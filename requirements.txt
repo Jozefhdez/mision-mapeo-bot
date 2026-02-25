@@ -1,0 +1,13 @@
+# Core
+python-telegram-bot==20.7
+requests==2.31.0
+beautifulsoup4==4.12.3
+pydantic==2.5.3
+python-dotenv==1.0.0
+
+# Database
+sqlalchemy==2.0.25
+
+# Utilities
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.25.0
