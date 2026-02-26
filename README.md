@@ -34,8 +34,17 @@ LLM_MODEL=google/gemini-2.5-flash-lite  # Modelo recomendado
 ### 3. Despliegue
 
 ```bash
-# Construir e iniciar con Docker
-docker run mision-mapeo-bot
+# Construir imagen
+docker build -t mision-mapeo-bot .
+
+# Iniciar contenedor
+docker run -d \
+  --name mision-mapeo-bot \
+  --restart unless-stopped \
+  --env-file .env \
+  -v "$(pwd)/data:/app/data" \
+  -v "$(pwd)/logs:/app/logs" \
+  mision-mapeo-bot
 
 # Ver logs
 docker logs -f mision-mapeo-bot
@@ -72,7 +81,6 @@ mision-mapeo-bot/
 ├── main.py                # Entry point
 ├── requirements.txt       # Dependencies
 ├── Dockerfile
-├── run-docker.sh          # Script para iniciar con Docker
 └── .env.example
 ```
 
@@ -83,3 +91,34 @@ SQLite con 3 tablas:
 - **initiatives**: Iniciativas procesadas
 - **sources**: URLs scrapeadas
 - **extraction_logs**: Logs de llamadas al LLM
+
+## Comandos Útiles
+
+```bash
+# Rebuildar imagen (después de cambios en código)
+docker stop mision-mapeo-bot
+docker rm mision-mapeo-bot
+docker build -t mision-mapeo-bot .
+docker run -d --name mision-mapeo-bot --restart unless-stopped --env-file .env \
+  -v "$(pwd)/data:/app/data" -v "$(pwd)/logs:/app/logs" mision-mapeo-bot
+
+# Ver logs en tiempo real
+docker logs -f mision-mapeo-bot
+
+# Detener el bot
+docker stop mision-mapeo-bot
+
+# Reiniciar el bot
+docker restart mision-mapeo-bot
+
+# Ver estado del contenedor
+docker ps
+
+# Acceder a la DB SQLite
+docker exec -it mision-mapeo-bot sqlite3 /app/data/initiatives.db
+
+# Limpiar todo (borra datos)
+docker stop mision-mapeo-bot
+docker rm mision-mapeo-bot
+rm -rf data/ logs/
+```
