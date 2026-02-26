@@ -1,5 +1,5 @@
 """
-Módulo de extracción de información con LLM Ollama.
+Módulo de extracción de información con LLM via OpenRouter.
 """
 import requests
 import json
@@ -12,57 +12,73 @@ logger = logging.getLogger(__name__)
 
 
 class LLMExtractor:
-    """Extractor de iniciativas usando Ollama local."""
+    """Extractor de iniciativas usando OpenRouter API con Gemini."""
     
-    def __init__(self, base_url: str = "http://ollama:11434", model: str = "llama3.1:8b"):
+    def __init__(self, api_key: str, model: str = "google/gemini-2.5-flash-lite"):
         """
         Inicializa el extractor LLM.
         
         Args:
-            base_url: URL del servidor Ollama
+            api_key: API key de OpenRouter
             model: Nombre del modelo a usar
         """
-        self.base_url = base_url.rstrip('/')
+        self.api_key = api_key
         self.model = model
-        self.endpoint = f"{self.base_url}/api/generate"
+        self.endpoint = "https://openrouter.ai/api/v1/chat/completions"
+        
+        # Precios por 1M tokens (Gemini 2.5 Flash Lite via OpenRouter)
+        self.input_price = 0.10  # $0.10 per 1M tokens
+        self.output_price = 0.40  # $0.40 per 1M tokens
     
-    def extract(self, scraped_data: Dict[str, str], max_retries: int = 1) -> tuple[Optional[Dict], Dict]:
+    def extract(self, url: str, max_retries: int = 1) -> tuple[Optional[Dict], Dict]:
         """
-        Extrae información estructurada del contenido scrapeado.
+        Extrae información estructurada directamente de una URL.
         
         Args:
-            scraped_data: Datos del scraper (title, content, etc)
+            url: URL de la iniciativa a analizar
             max_retries: Número máximo de reintentos
             
         Returns:
             tuple: (initiative_data, log_data)
         """
-        logger.info(f"Extracting initiative data using {self.model}")
+        logger.info(f"Extracting initiative data from {url} using {self.model}")
         
-        # Construir prompt
-        prompt = self._build_prompt(scraped_data)
+        # Construir prompt con URL
+        prompt = self._build_prompt(url)
         
         # Intentar extracción
         for attempt in range(max_retries + 1):
             try:
                 start_time = time.time()
                 
-                # Llamada a Ollama
-                response = self._call_ollama(prompt)
+                # Llamada a OpenRouter
+                response = self._call_openrouter(prompt)
                 
                 duration_ms = int((time.time() - start_time) * 1000)
                 
                 # Parse JSON response
-                initiative_data = self._parse_response(response['response'])
+                content = response['choices'][0]['message']['content']
+                initiative_data = self._parse_response(content)
+                
+                # Calcular costo
+                usage = response.get('usage', {})
+                prompt_tokens = usage.get('prompt_tokens', 0)
+                completion_tokens = usage.get('completion_tokens', 0)
+                total_tokens = prompt_tokens + completion_tokens
+                
+                cost_usd = (
+                    (prompt_tokens / 1_000_000 * self.input_price) +
+                    (completion_tokens / 1_000_000 * self.output_price)
+                )
                 
                 # Log exitoso
                 log_data = {
-                    'provider': 'local',
+                    'provider': 'openrouter',
                     'model_name': self.model,
-                    'prompt_tokens': response.get('prompt_eval_count', 0),
-                    'completion_tokens': response.get('eval_count', 0),
-                    'total_tokens': response.get('prompt_eval_count', 0) + response.get('eval_count', 0),
-                    'cost_usd': 0.0,
+                    'prompt_tokens': prompt_tokens,
+                    'completion_tokens': completion_tokens,
+                    'total_tokens': total_tokens,
+                    'cost_usd': round(cost_usd, 6),
                     'duration_ms': duration_ms,
                     'success': True,
                     'raw_response': json.dumps(response, ensure_ascii=False)
@@ -77,7 +93,7 @@ class LLMExtractor:
                 if attempt == max_retries:
                     # Log de fallo
                     log_data = {
-                        'provider': 'local',
+                        'provider': 'openrouter',
                         'model_name': self.model,
                         'success': False,
                         'error_message': str(e),
@@ -89,23 +105,16 @@ class LLMExtractor:
         
         return None, {}
     
-    def _build_prompt(self, scraped_data: Dict[str, str]) -> str:
+    def _build_prompt(self, url: str) -> str:
         """Construye el prompt para el LLM."""
         
-        # Truncar contenido si es muy largo (~2000 tokens para mejor performance)
-        content = scraped_data.get('content', '')[:8000]  # ~2k tokens aprox
-        
-        prompt = f"""Eres un asistente experto en análisis de iniciativas socioambientales. 
+        prompt = f"""Eres un asistente experto en análisis de iniciativas socioambientales.
 
-        Tu tarea es extraer información estructurada de una página web sobre una iniciativa.
+Tu tarea es visitar la siguiente URL y extraer información estructurada sobre la iniciativa:
 
-        DATOS DE LA PÁGINA:
-        Título: {scraped_data.get('title', 'N/A')}
-        Descripción: {scraped_data.get('description', 'N/A')}
-        URL: {scraped_data.get('url', 'N/A')}
+URL: {url}
 
-        CONTENIDO:
-        {content}
+Por favor, accede a esta URL, analiza todo el contenido de la página y extrae la información disponible
 
         INSTRUCCIONES:
         Extrae TODA la información disponible y devuelve un JSON con la siguiente estructura EXACTA:
@@ -139,31 +148,47 @@ class LLMExtractor:
         }}
 
         REGLAS IMPORTANTES:
-        1. Devuelve SOLO el JSON, sin texto adicional
-        2. Si no encuentras un dato, usa null para opcionales o infiere razonablemente
-        3. Las etiquetas deben ser 3-5 palabras clave en minúsculas
-        4. La descripción debe ser detallada (mínimo 50 caracteres)
-        5. La descripción del enfoque debe justificar por qué la iniciativa corresponde a ese enfoque (mínimo 200 caracteres)
+        1. Devuelve SOLO el JSON válido, sin texto adicional antes o después
+        2. CAMPOS CRÍTICOS (intenta siempre extraer o inferir razonablemente):
+           - nombre, descripcion, categoria, tipo_proyecto, tipo_enfoque, descripcion_enfoque
+           - Si no hay ubicación exacta, infiere de pistas (ej: dominio .mx = Mexico, menciones de ciudades)
+        3. CAMPOS OPCIONALES (usa null si no encuentras):
+           - ubicacion, codigo_postal, telefono, email, redes sociales
+        4. Para región y ciudad: Si no las encuentras explícitas pero hay pistas (dominio, texto), infiere razonablemente
+        5. Las etiquetas deben ser 3-5 palabras clave en minúsculas relacionadas con la iniciativa
+        6. La descripción debe ser detallada (mínimo 50 caracteres) - extrae del contenido principal
+        7. La descripción del enfoque debe justificar por qué tiene ese enfoque (mínimo 200 caracteres)
+        8. Si el sitio menciona México/ciudades mexicanas, usa "Mexico" como país
 
         JSON:"""
         
         return prompt
     
-    def _call_ollama(self, prompt: str, timeout: int = 300) -> Dict:
-        """Llama al API de Ollama."""
+    def _call_openrouter(self, prompt: str, timeout: int = 60) -> Dict:
+        """Llama al API de OpenRouter."""
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://misionmapeo.org",  # Opcional: para aparecer en leaderboards
+            "X-Title": "Mision Mapeo Bot"  # Opcional
+        }
+        
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {
-                "temperature": 0.3,
-                "top_p": 0.9,
-                "num_predict": 2048
-            }
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.3,
+            "top_p": 0.9,
+            "max_tokens": 2048
         }
         
         response = requests.post(
             self.endpoint,
+            headers=headers,
             json=payload,
             timeout=timeout
         )
@@ -188,15 +213,47 @@ class LLMExtractor:
         try:
             data = json.loads(json_text)
             
-            # Validar con Pydantic
-            initiative = Initiative(**data)
-            
-            return initiative.model_dump()
+            # Intentar validar con Pydantic
+            try:
+                initiative = Initiative(**data)
+                validated_data = initiative.model_dump()
+                validated_data['_validation_passed'] = True
+                validated_data['_missing_fields'] = []
+                return validated_data
+            except Exception as validation_error:
+                # Si falla validación, devolver datos con info de campos faltantes
+                logger.warning(f"Partial validation failure: {validation_error}")
+                data['_validation_passed'] = False
+                data['_missing_fields'] = self._extract_missing_fields(validation_error)
+                data['_validation_error'] = str(validation_error)
+                return data
             
         except json.JSONDecodeError as e:
             logger.error(f"JSON parse error: {e}")
             raise ValueError(f"JSON inválido: {e}")
+    
+    def _extract_missing_fields(self, error) -> list:
+        """Extrae nombres de campos faltantes del error de validación."""
+        import re
+        error_str = str(error)
         
-        except Exception as e:
-            logger.error(f"Validation error: {e}")
-            raise ValueError(f"Datos inválidos: {e}")
+        # Buscar patrones como "Field required [type=missing, input_value=..."
+        missing = []
+        for line in error_str.split('\n'):
+            if 'Field required' in line or 'field required' in line:
+                # Intentar extraer nombre del campo
+                match = re.search(r"'(\w+)'|(\w+)\s*\n", line)
+                if match:
+                    field_name = match.group(1) or match.group(2)
+                    if field_name and field_name not in missing:
+                        missing.append(field_name)
+        
+        # Si no encontramos ninguno con regex, intentar con el error directo
+        if not missing and hasattr(error, 'errors'):
+            for err in error.errors():
+                if err.get('type') == 'missing':
+                    field = err.get('loc', [])[-1] if err.get('loc') else None
+                    if field and field not in missing:
+                        missing.append(field)
+        
+        return missing

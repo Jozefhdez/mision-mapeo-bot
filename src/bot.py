@@ -89,8 +89,11 @@ class InitiativeBot:
             return
         
         text = update.message.text
-        
-        # Verificar si es una URL
+                # Verificar si el usuario está en modo edición
+        if context.user_data.get('editing_mode'):
+            await self._process_field_answer(update, context, text)
+            return
+                # Verificar si es una URL
         if not self._is_valid_url(text):
             await update.message.reply_text(
                 "Por favor envía una URL válida."
@@ -112,14 +115,9 @@ class InitiativeBot:
             domain = urlparse(url).netloc
             source_id = self.db.create_source(url, domain)
             
-            # 3. Scraping
-            await status_msg.edit_text("Extrayendo contenido de la página...")
-            scraped_data = self.scraper.scrape(url)
-            self.db.update_source_status(source_id, 'scraped')
-            
-            # 4. Extracción LLM
-            await status_msg.edit_text("Analizando contenido con IA...")
-            initiative_data, log_data = self.extractor.extract(scraped_data)
+            # 3. Extracción directa con IA (Gemini accede a la URL)
+            await status_msg.edit_text("Analizando página con IA")
+            initiative_data, log_data = self.extractor.extract(url)
             
             if not initiative_data:
                 error_msg = log_data.get('error_message', 'Error desconocido')
@@ -131,25 +129,64 @@ class InitiativeBot:
             log_data['source_id'] = source_id
             self.db.create_extraction_log(log_data)
             
+            # Actualizar status en DB
+            self.db.update_source_status(source_id, 'extracted')
+            
             # Agregar source_url
             initiative_data['source_url'] = url
             
-            # 5. Validación
+            # Verificar si hay campos faltantes (validación de Pydantic)
+            validation_passed = initiative_data.pop('_validation_passed', True)
+            missing_fields = initiative_data.pop('_missing_fields', [])
+            validation_error = initiative_data.pop('_validation_error', None)
+            
+            if not validation_passed and len(missing_fields) > 0:
+                # Guardar datos parciales
+                initiative_id = self.db.create_initiative(initiative_data, url)
+                self.pending_initiatives[initiative_id] = initiative_data
+                
+                # Mostrar preview con campos faltantes
+                await status_msg.delete()
+                await self._send_incomplete_preview(
+                    update, context, initiative_id, initiative_data, missing_fields
+                )
+                return
+            
+            # 4. Validación
             await status_msg.edit_text("Validando datos...")
             is_valid, errors, duplicates = self.validator.validate(initiative_data)
             
             if not is_valid:
+                # Extraer campos faltantes de los errores
+                missing_from_errors = []
+                for error in errors:
+                    if error.startswith("Campo requerido faltante: "):
+                        field = error.replace("Campo requerido faltante: ", "")
+                        missing_from_errors.append(field)
+                
+                # Si hay campos faltantes, mostrar interfaz de completar
+                if missing_from_errors:
+                    initiative_id = self.db.create_initiative(initiative_data, url)
+                    self.pending_initiatives[initiative_id] = initiative_data
+                    
+                    await status_msg.delete()
+                    await self._send_incomplete_preview(
+                        update, context, initiative_id, initiative_data, missing_from_errors
+                    )
+                    return
+                
+                # Si son otros errores, mostrar mensaje simple
                 error_text = "Errores de validación:\n\n" + "\n".join(f"• {e}" for e in errors)
                 await status_msg.edit_text(error_text)
                 return
             
-            # 6. Guardar en DB como pending
+            # 5. Guardar en DB como pending
             initiative_id = self.db.create_initiative(initiative_data, url)
             
             # Guardar en contexto temporal
             self.pending_initiatives[initiative_id] = initiative_data
             
-            # 7. Mostrar preview
+            # 6. Mostrar preview
             await status_msg.delete()
             await self._send_preview(update, context, initiative_id, initiative_data, duplicates)
             
@@ -181,6 +218,80 @@ class InitiativeBot:
         
         await update.effective_chat.send_message(
             preview_text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+    
+    async def _send_incomplete_preview(
+        self,
+        update: Update,
+        context: ContextTypes.DEFAULT_TYPE,
+        initiative_id: int,
+        data: dict,
+        missing_fields: list
+    ):
+        """Envía preview de datos incompletos con instrucciones para completar."""
+        
+        # Mapeo de campos a nombres legibles en español
+        field_names = {
+            'nombre': 'Nombre de la iniciativa',
+            'descripcion': 'Descripción',
+            'categoria': 'Categoría',
+            'etiquetas': 'Etiquetas',
+            'tipo_proyecto': 'Tipo de Proyecto',
+            'tipo_enfoque': 'Tipo de Enfoque',
+            'descripcion_enfoque': 'Descripción del Enfoque',
+            'ods': 'ODS (Objetivos de Desarrollo Sostenible)',
+            'fuente_recursos': 'Fuente de Recursos',
+            'sector_economico': 'Sector Económico',
+            'cobertura': 'Cobertura',
+            'estatus': 'Estatus',
+            'tamano': 'Tamaño',
+            'ubicacion': 'Dirección',
+            'pais': 'País',
+            'region': 'Región/Estado',
+            'ciudad': 'Ciudad'
+        }
+        
+        # Construir mensaje
+        preview = f"⚠️ <b>Datos Incompletos - Requiere Completar</b>\n\n"
+        preview += f"Gemini extrajo la información pero <b>faltan {len(missing_fields)} campos obligatorios</b>:\n\n"
+        
+        for field in missing_fields:
+            field_label = field_names.get(field, field)
+            preview += f"❌ <b>{field_label}</b>\n"
+        
+        preview += f"\n📋 <b>Datos Extraídos:</b>\n\n"
+        
+        # Mostrar datos que sí se extrajeron
+        if data.get('nombre'):
+            preview += f"<b>Nombre:</b> {data['nombre']}\n"
+        if data.get('categoria'):
+            preview += f"<b>Categoría:</b> {data['categoria']}\n"
+        if data.get('ciudad'):
+            preview += f"<b>Ciudad:</b> {data['ciudad']}\n"
+        if data.get('region'):
+            preview += f"<b>Región:</b> {data['region']}\n"
+        
+        preview += f"\n💡 <b>Opciones:</b>\n"
+        preview += f"• <b>Completar ahora</b>: Te preguntaré cada campo faltante\n"
+        preview += f"• <b>Rechazar</b>: Descartar esta iniciativa"
+        
+        # Guardar missing_fields en contexto
+        context.user_data['pending_initiative_id'] = initiative_id
+        context.user_data['missing_fields'] = missing_fields
+        
+        # Botones
+        keyboard = [
+            [
+                InlineKeyboardButton("✏️ Completar Ahora", callback_data=f"edit_{initiative_id}"),
+                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{initiative_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.effective_chat.send_message(
+            preview,
             reply_markup=reply_markup,
             parse_mode='HTML'
         )
@@ -242,6 +353,8 @@ class InitiativeBot:
             await self._confirm_initiative(query, initiative_id)
         elif action == "reject":
             await self._reject_initiative(query, initiative_id)
+        elif action == "edit":
+            await self._start_field_editing(query, context, initiative_id)
     
     async def _confirm_initiative(self, query, initiative_id: int):
         """Confirma y publica una iniciativa."""
@@ -301,6 +414,109 @@ class InitiativeBot:
         await query.edit_message_text(
             "Iniciativa rechazada.\n\n"
             "Envía otra URL para procesar una nueva iniciativa."
+        )
+    
+    async def _start_field_editing(self, query, context: ContextTypes.DEFAULT_TYPE, initiative_id: int):
+        """Inicia el flujo de edición interactiva de campos."""
+        missing_fields = context.user_data.get('missing_fields', [])
+        
+        if not missing_fields:
+            await query.edit_message_text("❌ No hay campos faltantes.")
+            return
+        
+        # Configurar modo edición
+        context.user_data['editing_mode'] = True
+        context.user_data['current_field_index'] = 0
+        context.user_data['editing_initiative_id'] = initiative_id
+        
+        # Preguntar primer campo
+        field_labels = {
+            'ubicacion': 'Ubicación/Dirección',
+            'region': 'Región/Estado',
+            'ciudad': 'Ciudad',
+            'pais': 'País'
+        }
+        
+        first_field = missing_fields[0]
+        field_label = field_labels.get(first_field, first_field)
+        
+        message = f"📝 <b>Completando campos ({1}/{len(missing_fields)})</b>\n\n"
+        message += f"<b>{field_label}:</b>\n"
+        message += "Envía tu respuesta:"
+        
+        await query.edit_message_text(message, parse_mode='HTML')
+    
+    async def _process_field_answer(self, update: Update, context: ContextTypes.DEFAULT_TYPE, answer: str):
+        """Procesa la respuesta del usuario para un campo."""
+        missing_fields = context.user_data.get('missing_fields', [])
+        current_index = context.user_data.get('current_field_index', 0)
+        initiative_id = context.user_data.get('editing_initiative_id')
+        
+        current_field = missing_fields[current_index]
+        initiative_data = self.pending_initiatives.get(initiative_id, {})
+        
+        # Guardar respuesta
+        if current_field == 'etiquetas':
+            tags = [tag.strip().lower() for tag in answer.split(',')]
+            initiative_data[current_field] = tags
+        else:
+            initiative_data[current_field] = answer.strip()
+        
+        self.pending_initiatives[initiative_id] = initiative_data
+        current_index += 1
+        context.user_data['current_field_index'] = current_index
+        
+        # Si ya completamos todos
+        if current_index >= len(missing_fields):
+            context.user_data['editing_mode'] = False
+            await update.message.reply_text("✅ ¡Campos completados! Validando...")
+            
+            is_valid, errors, duplicates = self.validator.validate(initiative_data)
+            
+            if not is_valid:
+                error_text = "❌ Errores:\n\n" + "\n".join(f"• {e}" for e in errors)
+                await update.message.reply_text(error_text)
+                context.user_data.clear()
+                return
+            
+            # Mostrar preview final
+            await self._send_final_preview(update, context, initiative_id, initiative_data, duplicates)
+            context.user_data.clear()
+            return
+        
+        # Preguntar siguiente campo
+        field_labels = {
+            'ubicacion': 'Ubicación/Dirección',
+            'region': 'Región/Estado',
+            'ciudad': 'Ciudad',
+            'pais': 'País'
+        }
+        
+        next_field = missing_fields[current_index]
+        field_label = field_labels.get(next_field, next_field)
+        
+        message = f"✅ Guardado.\n\n📝 <b>Campo {current_index + 1}/{len(missing_fields)}</b>\n\n"
+        message += f"<b>{field_label}:</b>\n"
+        message += "Envía tu respuesta:"
+        
+        await update.message.reply_text(message, parse_mode='HTML')
+    
+    async def _send_final_preview(self, update: Update, context: ContextTypes.DEFAULT_TYPE, initiative_id: int, data: dict, duplicates: list):
+        """Envía preview final después de completar campos."""
+        preview_text = self._format_preview(data, duplicates)
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{initiative_id}"),
+                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{initiative_id}")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            preview_text,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
         )
     
     def _is_valid_url(self, text: str) -> bool:

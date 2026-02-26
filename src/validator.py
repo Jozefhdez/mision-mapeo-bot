@@ -45,7 +45,8 @@ class Validator:
         ]
         
         for field in required_fields:
-            if not initiative_data.get(field):
+            value = initiative_data.get(field)
+            if value is None or value == '' or (isinstance(value, list) and len(value) == 0):
                 errors.append(f"Campo requerido faltante: {field}")
         
         # 2. Validar longitud de descripción
@@ -97,6 +98,10 @@ class Validator:
         duplicates = []
         
         for candidate in candidates:
+            # Validar que el candidato tenga los campos necesarios
+            if not candidate.get('nombre') or not candidate.get('ciudad'):
+                continue
+            
             # Calcular similaridad del nombre
             name_similarity = fuzz.ratio(
                 name.lower(),

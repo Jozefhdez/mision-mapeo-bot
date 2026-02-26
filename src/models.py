@@ -31,7 +31,7 @@ class Initiative(BaseModel):
     
     # Ubicación Geográfica
     ubicacion: str = Field(...)
-    pais: str = Field(...)
+    pais: str = Field()  # Default a Mexico
     region: str = Field(...)
     ciudad: str = Field(...)
     codigo_postal: Optional[str] = None

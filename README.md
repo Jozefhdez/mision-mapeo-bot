@@ -6,8 +6,9 @@ Bot de Telegram para registro asistido de iniciativas socioambientales en Bekaab
 
 ### 1. Requisitos
 
-- Docker y Docker Compose
+- Docker
 - Bot de Telegram (obtener token de @BotFather)
+- API Key de OpenRouter (https://openrouter.ai/keys)
 - API Key configurada en Bekaab (Code Snippet)
 
 ### 2. Configuración
@@ -25,23 +26,19 @@ Configura las siguientes variables:
 ```bash
 TELEGRAM_BOT_TOKEN=       # Token del bot de Telegram
 TELEGRAM_ADMIN_USER_ID=   # Tu user ID de Telegram
+OPENROUTER_API_KEY=       # API key de OpenRouter
 CODE_SNIPPET_API_KEY=     # API key de Bekaab
+LLM_MODEL=google/gemini-2.5-flash-lite  # Modelo recomendado
 ```
 
 ### 3. Despliegue
 
 ```bash
-# Iniciar Ollama primero
-docker-compose up -d ollama
-
-# Descargar modelo de Llama (solo primera vez)
-docker exec -it mision-mapeo-ollama ollama pull llama3.1:8b
-
-# Iniciar aplicación completa
-docker-compose up -d
+# Construir e iniciar con Docker
+./run-docker.sh
 
 # Ver logs
-docker-compose logs -f app
+docker logs -f mision-mapeo-bot
 ```
 
 ### 4. Uso
@@ -50,11 +47,15 @@ docker-compose logs -f app
 2. Envía `/start` para verificar que funciona
 3. Envía una URL de una iniciativa
 4. El bot procesará automáticamente:
-   - Scraping del contenido
-   - Extracción con IA
+   - **Gemini accede directamente a la URL** (no necesita scraper)
+   - Extracción inteligente del contenido con IA
    - Validación y detección de duplicados
-5. Revisa el preview y confirma o rechaza
-6. ¡Listo! Se publica en Bekaab en modo draft
+5. **Si faltan campos:** Presiona "Completar Ahora"
+   - El bot te preguntará cada campo conversacionalmente
+   - Responde con el texto correspondiente
+   - Progreso visible (1/3, 2/3, etc.)
+6. Revisa el preview final y presiona "Confirmar y Publicar"
+7. ¡Listo! Se publica en Bekaab en modo draft
 
 ## Estructura del Proyecto
 
@@ -64,35 +65,41 @@ mision-mapeo-bot/
 │   ├── __init__.py
 │   ├── models.py          # Modelos Pydantic
 │   ├── database.py        # SQLite operations
-│   ├── scraper.py         # Web scraping
-│   ├── extractor.py       # LLM extraction
+│   ├── extractor.py       # LLM extraction (Gemini directo)
 │   ├── validator.py       # Validation & duplicates
 │   ├── bekaab_client.py   # Bekaab API client
-│   └── bot.py             # Telegram bot
+│   └── bot.py             # Telegram bot + editor conversacional
 ├── main.py                # Entry point
 ├── requirements.txt       # Dependencies
 ├── Dockerfile
-├── docker-compose.yml
+├── run-docker.sh          # Script para iniciar con Docker
 └── .env.example
 ```
 
 ## Comandos Útiles
 
 ```bash
-# Detener servicios
-docker-compose down
+# Iniciar/Rebuildar el bot
+./run-docker.sh
 
 # Ver logs en tiempo real
-docker-compose logs -f
+docker logs -f mision-mapeo-bot
 
-# Reiniciar solo el bot
-docker-compose restart app
+# Detener el bot
+docker stop mision-mapeo-bot
+
+# Reiniciar el bot
+docker restart mision-mapeo-bot
+
+# Ver estado del contenedor
+docker ps
 
 # Acceder a la DB SQLite
 docker exec -it mision-mapeo-bot sqlite3 /app/data/initiatives.db
 
 # Limpiar todo (borra datos)
-docker-compose down -v
+docker stop mision-mapeo-bot
+docker rm mision-mapeo-bot
 rm -rf data/ logs/
 ```
 

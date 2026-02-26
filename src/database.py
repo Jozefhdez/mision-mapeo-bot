@@ -142,6 +142,21 @@ class Database:
         conn.close()
         logger.info(f"Updated initiative {initiative_id} to status: {status}")
     
+    def update_initiative_data(self, initiative_id: int, data: Dict):
+        """Actualiza los datos completos de una iniciativa."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            UPDATE initiatives 
+            SET data_json = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (json.dumps(data, ensure_ascii=False), initiative_id))
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Updated initiative {initiative_id} data")
+    
     def search_duplicates(self, name: str, city: str) -> List[Dict]:
         """Busca iniciativas similares por nombre y ciudad."""
         conn = self._get_connection()

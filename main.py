@@ -37,8 +37,7 @@ def main():
     required_vars = [
         'TELEGRAM_BOT_TOKEN',
         'TELEGRAM_ADMIN_USER_ID',
-        'OLLAMA_BASE_URL',
-        'OLLAMA_MODEL',
+        'OPENROUTER_API_KEY',
         'BEKAAB_API_URL',
         'CODE_SNIPPET_API_KEY'
     ]
@@ -59,8 +58,8 @@ def main():
     )
     
     extractor = LLMExtractor(
-        base_url=os.getenv('OLLAMA_BASE_URL'),
-        model=os.getenv('OLLAMA_MODEL')
+        api_key=os.getenv('OPENROUTER_API_KEY'),
+        model=os.getenv('LLM_MODEL', 'google/gemini-2.5-flash-lite')
     )
     
     validator = Validator(
