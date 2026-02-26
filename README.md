@@ -35,7 +35,7 @@ LLM_MODEL=google/gemini-2.5-flash-lite  # Modelo recomendado
 
 ```bash
 # Construir e iniciar con Docker
-./run-docker.sh
+docker run mision-mapeo-bot
 
 # Ver logs
 docker logs -f mision-mapeo-bot
@@ -74,33 +74,6 @@ mision-mapeo-bot/
 ├── Dockerfile
 ├── run-docker.sh          # Script para iniciar con Docker
 └── .env.example
-```
-
-## Comandos Útiles
-
-```bash
-# Iniciar/Rebuildar el bot
-./run-docker.sh
-
-# Ver logs en tiempo real
-docker logs -f mision-mapeo-bot
-
-# Detener el bot
-docker stop mision-mapeo-bot
-
-# Reiniciar el bot
-docker restart mision-mapeo-bot
-
-# Ver estado del contenedor
-docker ps
-
-# Acceder a la DB SQLite
-docker exec -it mision-mapeo-bot sqlite3 /app/data/initiatives.db
-
-# Limpiar todo (borra datos)
-docker stop mision-mapeo-bot
-docker rm mision-mapeo-bot
-rm -rf data/ logs/
 ```
 
 ## Base de Datos
