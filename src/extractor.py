@@ -92,8 +92,8 @@ class LLMExtractor:
     def _build_prompt(self, scraped_data: Dict[str, str]) -> str:
         """Construye el prompt para el LLM."""
         
-        # Truncar contenido si es muy largo (~6000 tokens)
-        content = scraped_data.get('content', '')[:24000]  # ~6k tokens aprox
+        # Truncar contenido si es muy largo (~2000 tokens para mejor performance)
+        content = scraped_data.get('content', '')[:8000]  # ~2k tokens aprox
         
         prompt = f"""Eres un asistente experto en análisis de iniciativas socioambientales. 
 
@@ -149,7 +149,7 @@ JSON:"""
         
         return prompt
     
-    def _call_ollama(self, prompt: str, timeout: int = 120) -> Dict:
+    def _call_ollama(self, prompt: str, timeout: int = 300) -> Dict:
         """Llama al API de Ollama."""
         payload = {
             "model": self.model,
@@ -157,7 +157,8 @@ JSON:"""
             "stream": False,
             "options": {
                 "temperature": 0.3,
-                "top_p": 0.9
+                "top_p": 0.9,
+                "num_predict": 2048
             }
         }
         

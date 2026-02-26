@@ -26,7 +26,7 @@ TELEGRAM_ADMIN_USER_ID=12345678         # Tu user ID
 CODE_SNIPPET_API_KEY=tu-clave-aqui      # De WordPress
 ```
 
-💡 **¿Cómo obtener tu Telegram User ID?**  
+**¿Cómo obtener tu Telegram User ID?**  
 Envía `/start` a [@userinfobot](https://t.me/userinfobot)
 
 ## Paso 2: Usar Script Automático
@@ -149,7 +149,3 @@ Si algo no funciona:
 2. Verifica `.env` esté configurado correctamente
 3. Asegúrate que Ollama descargó el modelo
 4. Verifica conectividad a internet
-
----
-
-**¿Todo funcionando?** 🎉 ¡Felicitaciones! Ya puedes empezar a registrar iniciativas.
