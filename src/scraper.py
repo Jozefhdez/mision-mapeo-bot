@@ -41,26 +41,15 @@ class Scraper:
         logger.info(f"Scraping URL: {url}")
         
         try:
-            # GET request
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
             response.raise_for_status()
             
             # Parse HTML
             soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extraer dominio
             domain = urlparse(url).netloc
-            
-            # Extraer título
             title = self._extract_title(soup)
-            
-            # Extraer meta description
             description = self._extract_meta_description(soup)
-            
-            # Extraer contenido del body
             content = self._extract_body_text(soup)
-            
-            # Extraer Open Graph data si existe
             og_data = self._extract_og_data(soup)
             
             result = {
@@ -79,22 +68,21 @@ class Scraper:
             
         except requests.exceptions.Timeout:
             logger.error(f"Timeout scraping {url}")
-            raise Exception(f"⏱️ Timeout alcanzado ({self.timeout}s)")
+            raise Exception(f"Timeout alcanzado ({self.timeout}s)")
         
         except requests.exceptions.RequestException as e:
             logger.error(f"Request error scraping {url}: {e}")
-            raise Exception(f"❌ Error al acceder a la URL: {str(e)}")
+            raise Exception(f"Error al acceder a la URL: {str(e)}")
         
         except Exception as e:
             logger.error(f"Unexpected error scraping {url}: {e}")
-            raise Exception(f"💥 Error inesperado: {str(e)}")
+            raise Exception(f"Error inesperado: {str(e)}")
     
     def _extract_title(self, soup: BeautifulSoup) -> str:
         """Extrae el título de la página."""
         if soup.title and soup.title.string:
             return soup.title.string.strip()
         
-        # Fallback: buscar h1
         h1 = soup.find('h1')
         if h1:
             return h1.get_text().strip()
@@ -131,19 +119,14 @@ class Scraper:
         Extrae texto limpio del body.
         Remueve scripts, styles, nav, footer.
         """
-        # Remover elementos no deseados
         for element in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
             element.decompose()
         
-        # Obtener texto del body
         body = soup.find('body')
         if not body:
             return soup.get_text()
         
-        # Extraer texto y limpiar
         text = body.get_text(separator='\n', strip=True)
-        
-        # Limpiar líneas vacías múltiples
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         text = '\n'.join(lines)
         

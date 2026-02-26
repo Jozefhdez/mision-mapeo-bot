@@ -28,17 +28,12 @@ def setup_logging():
 
 
 def main():
-    """Función principal."""
-    # Cargar variables de entorno
     load_dotenv()
-    
-    # Setup logging
     setup_logging()
     logger = logging.getLogger(__name__)
     
     logger.info("Starting Misión Mapeo Bot...")
     
-    # Validar variables de entorno requeridas
     required_vars = [
         'TELEGRAM_BOT_TOKEN',
         'TELEGRAM_ADMIN_USER_ID',
@@ -53,7 +48,6 @@ def main():
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
     
-    # Inicializar componentes
     logger.info("Initializing components...")
     
     db = Database(

@@ -2,7 +2,7 @@
 
 Bot de Telegram para registro asistido de iniciativas socioambientales en Bekaab.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Requisitos
 
@@ -56,7 +56,7 @@ docker-compose logs -f app
 5. Revisa el preview y confirma o rechaza
 6. ¡Listo! Se publica en Bekaab en modo draft
 
-## 📁 Estructura del Proyecto
+## Estructura del Proyecto
 
 ```
 mision-mapeo-bot/
@@ -76,7 +76,7 @@ mision-mapeo-bot/
 └── .env.example
 ```
 
-## 🔧 Comandos Útiles
+## Comandos Útiles
 
 ```bash
 # Detener servicios
@@ -91,63 +91,15 @@ docker-compose restart app
 # Acceder a la DB SQLite
 docker exec -it mision-mapeo-bot sqlite3 /app/data/initiatives.db
 
-# Limpiar todo (⚠️ borra datos)
+# Limpiar todo (borra datos)
 docker-compose down -v
 rm -rf data/ logs/
 ```
 
-## 📊 Base de Datos
+## Base de Datos
 
 SQLite con 3 tablas:
 
 - **initiatives**: Iniciativas procesadas
 - **sources**: URLs scrapeadas
 - **extraction_logs**: Logs de llamadas al LLM
-
-## 🐛 Troubleshooting
-
-### El bot no responde
-
-```bash
-# Verificar que el bot está corriendo
-docker-compose ps
-
-# Ver logs de errores
-docker-compose logs app | grep ERROR
-```
-
-### Error de conexión a Ollama
-
-```bash
-# Verificar que Ollama está corriendo
-docker exec -it mision-mapeo-ollama ollama list
-
-# Reiniciar Ollama
-docker-compose restart ollama
-```
-
-### Error al publicar en Bekaab
-
-1. Verifica que la API key sea correcta en `.env`
-2. Verifica que el Code Snippet esté activo en WordPress
-3. Revisa logs: `docker-compose logs app | grep Bekaab`
-
-## 📝 Notas
-
-- Las iniciativas se crean en Bekaab con estado **draft** para revisión manual final
-- El modelo Llama 3.1 8B requiere ~4.7GB de espacio
-- Los datos se persisten en volúmenes Docker (`data/` y `logs/`)
-
-## 🔐 Seguridad
-
-- Nunca commitear el archivo `.env`
-- Mantener la API key de Bekaab segura
-- Solo el user ID configurado puede usar el bot
-
-## 📚 Documentación Adicional
-
-Ver en la carpeta raíz del proyecto:
-
-- `PROJECT.md` - Visión general del proyecto
-- `DATA_MODEL.md` - Modelo de datos completo
-- `code_snippet.md` - Documentación de la API de Bekaab

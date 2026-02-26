@@ -35,16 +35,13 @@ class BekaabClient:
         logger.info(f"Publishing initiative to Bekaab: {initiative_data.get('nombre')}")
         
         try:
-            # Mapear datos al formato de Bekaab
-            payload = self._map_to_bekaab_format(initiative_data)
+            payload = self._map_to_bekaab_format(initiative_data) # Mapear datos al formato de Bekaab
             
-            # Headers
             headers = {
                 "Content-Type": "application/json",
                 "X-API-KEY": self.api_key
             }
             
-            # Request
             response = requests.post(
                 self.api_url,
                 json=payload,

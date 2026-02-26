@@ -69,7 +69,7 @@ class InitiativeBot:
             return
         
         await update.message.reply_text(
-            "👋 ¡Hola! Soy el bot de Misión Mapeo.\n\n"
+            "¡Hola! Soy el bot de Misión Mapeo.\n\n"
             "Envíame la URL de una iniciativa y la procesaré automáticamente.\n\n"
             "El proceso:\n"
             "1. Extraigo el contenido de la página\n"
@@ -93,8 +93,7 @@ class InitiativeBot:
         # Verificar si es una URL
         if not self._is_valid_url(text):
             await update.message.reply_text(
-                "⚠️ Por favor envía una URL válida.\n"
-                "Ejemplo: https://ejemplo.com/iniciativa"
+                "Por favor envía una URL válida."
             )
             return
         
@@ -106,7 +105,7 @@ class InitiativeBot:
         chat_id = update.effective_chat.id
         
         # 1. Notificar inicio
-        status_msg = await update.message.reply_text("⏳ Procesando iniciativa...")
+        status_msg = await update.message.reply_text("Procesando iniciativa...")
         
         try:
             # 2. Crear registro de source en DB
@@ -114,17 +113,17 @@ class InitiativeBot:
             source_id = self.db.create_source(url, domain)
             
             # 3. Scraping
-            await status_msg.edit_text("📄 Extrayendo contenido de la página...")
+            await status_msg.edit_text("Extrayendo contenido de la página...")
             scraped_data = self.scraper.scrape(url)
             self.db.update_source_status(source_id, 'scraped')
             
             # 4. Extracción LLM
-            await status_msg.edit_text("🤖 Analizando contenido con IA...")
+            await status_msg.edit_text("Analizando contenido con IA...")
             initiative_data, log_data = self.extractor.extract(scraped_data)
             
             if not initiative_data:
                 error_msg = log_data.get('error_message', 'Error desconocido')
-                await status_msg.edit_text(f"❌ Error en extracción: {error_msg}")
+                await status_msg.edit_text(f"Error en extracción: {error_msg}")
                 self.db.update_source_status(source_id, 'failed', error_msg)
                 return
             
@@ -136,11 +135,11 @@ class InitiativeBot:
             initiative_data['source_url'] = url
             
             # 5. Validación
-            await status_msg.edit_text("✅ Validando datos...")
+            await status_msg.edit_text("Validando datos...")
             is_valid, errors, duplicates = self.validator.validate(initiative_data)
             
             if not is_valid:
-                error_text = "❌ Errores de validación:\n\n" + "\n".join(f"• {e}" for e in errors)
+                error_text = "Errores de validación:\n\n" + "\n".join(f"• {e}" for e in errors)
                 await status_msg.edit_text(error_text)
                 return
             
@@ -156,7 +155,7 @@ class InitiativeBot:
             
         except Exception as e:
             logger.error(f"Error processing URL {url}: {e}")
-            await status_msg.edit_text(f"💥 Error inesperado: {str(e)}")
+            await status_msg.edit_text(f"Error inesperado: {str(e)}")
     
     async def _send_preview(
         self,
@@ -174,8 +173,8 @@ class InitiativeBot:
         # Botones
         keyboard = [
             [
-                InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{initiative_id}"),
-                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{initiative_id}")
+                InlineKeyboardButton("Confirmar y Publicar", callback_data=f"confirm_{initiative_id}"),
+                InlineKeyboardButton("Rechazar", callback_data=f"reject_{initiative_id}")
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -189,11 +188,11 @@ class InitiativeBot:
     def _format_preview(self, data: dict, duplicates: list) -> str:
         """Formatea los datos para el preview."""
         
-        preview = f"<b>📋 Preview de Iniciativa</b>\n\n"
+        preview = f"<b>Preview de Iniciativa</b>\n\n"
         
         # Warning de duplicados
         if duplicates:
-            preview += "⚠️ <b>POSIBLES DUPLICADOS:</b>\n"
+            preview += "<b>POSIBLES DUPLICADOS:</b>\n"
             for dup in duplicates[:3]:
                 preview += f"  • {dup['nombre']} ({dup['ciudad']}) - {dup['similarity']}% similar\n"
             preview += "\n"
@@ -275,9 +274,9 @@ class InitiativeBot:
                     del self.pending_initiatives[initiative_id]
                 
                 await query.edit_message_text(
-                    f"✅ <b>¡Iniciativa publicada con éxito!</b>\n\n"
-                    f"📝 Post ID en Bekaab: {post_id}\n"
-                    f"💾 Initiative ID local: {initiative_id}\n\n"
+                    f"<b>¡Iniciativa publicada con éxito!</b>\n\n"
+                    f"Post ID en Bekaab: {post_id}\n"
+                    f"Initiative ID local: {initiative_id}\n\n"
                     f"La iniciativa se creó en estado 'draft' para revisión final.",
                     parse_mode='HTML'
                 )
@@ -290,7 +289,7 @@ class InitiativeBot:
         
         except Exception as e:
             logger.error(f"Error confirming initiative: {e}")
-            await query.edit_message_text(f"💥 Error inesperado: {str(e)}")
+            await query.edit_message_text(f"Error inesperado: {str(e)}")
     
     async def _reject_initiative(self, query, initiative_id: int):
         """Rechaza una iniciativa."""
@@ -300,7 +299,7 @@ class InitiativeBot:
             del self.pending_initiatives[initiative_id]
         
         await query.edit_message_text(
-            "❌ Iniciativa rechazada.\n\n"
+            "Iniciativa rechazada.\n\n"
             "Envía otra URL para procesar una nueva iniciativa."
         )
     
