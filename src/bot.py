@@ -29,7 +29,7 @@ class InitiativeBot:
     def __init__(
         self,
         token: str,
-        admin_user_id: int,
+        allowed_user_ids: list[int],
         db: Database,
         scraper: Scraper,
         extractor: LLMExtractor,
@@ -38,7 +38,7 @@ class InitiativeBot:
     ):
         """Inicializa el bot."""
         self.token = token
-        self.admin_user_id = admin_user_id
+        self.allowed_user_ids = allowed_user_ids
         self.db = db
         self.scraper = scraper
         self.extractor = extractor
@@ -64,7 +64,7 @@ class InitiativeBot:
         """Handler del comando /start."""
         user_id = update.effective_user.id
         
-        if user_id != self.admin_user_id:
+        if user_id not in self.allowed_user_ids:
             await update.message.reply_text("❌ No autorizado.")
             return
         
@@ -84,7 +84,7 @@ class InitiativeBot:
         user_id = update.effective_user.id
         
         # Verificar autorización
-        if user_id != self.admin_user_id:
+        if user_id not in self.allowed_user_ids:
             await update.message.reply_text("❌ No autorizado.")
             return
         

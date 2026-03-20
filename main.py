@@ -36,7 +36,6 @@ def main():
     
     required_vars = [
         'TELEGRAM_BOT_TOKEN',
-        'TELEGRAM_ADMIN_USER_ID',
         'OPENROUTER_API_KEY',
         'BEKAAB_API_URL',
         'CODE_SNIPPET_API_KEY'
@@ -46,8 +45,28 @@ def main():
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         return
+
+    # Load allowed users
+    allowed_ids_str = os.getenv('ALLOWED_TELEGRAM_IDS', '')
+    allowed_user_ids = []
     
-    logger.info("Initializing components...")
+    if allowed_ids_str:
+        try:
+            allowed_user_ids = [int(id.strip()) for id in allowed_ids_str.split(',') if id.strip()]
+        except ValueError:
+            logger.error("ALLOWED_TELEGRAM_IDS contains non-numeric values")
+            return
+            
+    # Backward compatibility
+    if not allowed_user_ids:
+        admin_id = os.getenv('TELEGRAM_ADMIN_USER_ID')
+        if admin_id:
+            allowed_user_ids = [int(admin_id)]
+        else:
+            logger.error("Neither ALLOWED_TELEGRAM_IDS nor TELEGRAM_ADMIN_USER_ID is set")
+            return
+    
+    logger.info(f"Initializing components... (Allowed users: {len(allowed_user_ids)})")
     
     db = Database(
         db_path=os.getenv('DATABASE_PATH', './data/initiatives.db')
@@ -74,7 +93,7 @@ def main():
     
     bot = InitiativeBot(
         token=os.getenv('TELEGRAM_BOT_TOKEN'),
-        admin_user_id=int(os.getenv('TELEGRAM_ADMIN_USER_ID')),
+        allowed_user_ids=allowed_user_ids,
         db=db,
         scraper=scraper,
         extractor=extractor,
