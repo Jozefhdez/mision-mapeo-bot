@@ -3,6 +3,7 @@ Bot de Telegram para registro asistido de iniciativas.
 """
 import os
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -19,6 +20,9 @@ from src.extractor import LLMExtractor
 from src.validator import Validator
 from src.bekaab_client import BekaabClient
 from src.database import Database
+from src.form_config import FORM_CONFIG
+from src.models import Initiative
+from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -44,485 +48,526 @@ class InitiativeBot:
         self.extractor = extractor
         self.validator = validator
         self.bekaab_client = bekaab_client
-        
-        # Storage temporal para contexto (en producción usar Redis o similar)
         self.pending_initiatives = {}
     
     def run(self):
         """Inicia el bot."""
         application = Application.builder().token(self.token).build()
         
-        # Handlers
         application.add_handler(CommandHandler("start", self.start_command))
-        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
+        # Removemos las fotos agrupadas y otros tipos de media ajena a menos que sea el campo de imagenes.
+        application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, self.handle_message))
         application.add_handler(CallbackQueryHandler(self.handle_callback))
         
-        logger.info("Bot started - polling for messages...")
+        logger.info("Bot started...")
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     
     async def start_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler del comando /start."""
-        user_id = update.effective_user.id
-        
-        if user_id not in self.allowed_user_ids:
+        if update.effective_user.id not in self.allowed_user_ids:
             await update.message.reply_text("❌ No autorizado.")
             return
         
-        await update.message.reply_text(
-            "¡Hola! Soy el bot de Misión Mapeo.\n\n"
-            "Envíame la URL de una iniciativa y la procesaré automáticamente.\n\n"
-            "El proceso:\n"
-            "1. Extraigo el contenido de la página\n"
-            "2. Analizo con IA la información\n"
-            "3. Te muestro un preview para confirmar\n"
-            "4. Publico en Bekaab si apruebas\n\n"
-            "¡Envía una URL para empezar!"
-        )
+        await update.message.reply_text("¡Hola! Envía una URL para procesar una iniciativa.")
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler de mensajes de texto."""
-        user_id = update.effective_user.id
-        
-        # Verificar autorización
-        if user_id not in self.allowed_user_ids:
-            await update.message.reply_text("❌ No autorizado.")
+        if update.effective_user.id not in self.allowed_user_ids:
             return
-        
-        text = update.message.text
-                # Verificar si el usuario está en modo edición
+
+        if context.user_data.get('editing_mode') and update.message.photo and self._is_image_input_active(context):
+            file_id = update.message.photo[-1].file_id
+            buffer = context.user_data.setdefault('image_edit_buffer', [])
+
+            if update.message.media_group_id:
+                current_group = context.user_data.get('image_edit_media_group')
+                if current_group != update.message.media_group_id:
+                    buffer.clear()
+                    context.user_data['image_edit_media_group'] = update.message.media_group_id
+
+                if file_id not in buffer:
+                    buffer.append(file_id)
+
+                await self._schedule_image_input_finalize(update, context, update.message.media_group_id)
+                return
+
+            buffer.clear()
+            buffer.append(file_id)
+            await self._finalize_image_input(update, context)
+            return
+
         if context.user_data.get('editing_mode'):
-            await self._process_field_answer(update, context, text)
-            return
-                # Verificar si es una URL
-        if not self._is_valid_url(text):
-            await update.message.reply_text(
-                "Por favor envía una URL válida."
-            )
-            return
-        
-        # Procesar URL
-        await self._process_url(update, context, text)
-    
-    async def _process_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-        """Procesa una URL completa end-to-end."""
-        chat_id = update.effective_chat.id
-        
-        # 1. Notificar inicio
-        status_msg = await update.message.reply_text("Procesando iniciativa...")
-        
-        try:
-            # 2. Crear registro de source en DB
-            domain = urlparse(url).netloc
-            source_id = self.db.create_source(url, domain)
-            
-            # 3. Extracción directa con IA (Gemini accede a la URL)
-            await status_msg.edit_text("Analizando página con IA")
-            initiative_data, log_data = self.extractor.extract(url)
-            
-            if not initiative_data:
-                error_msg = log_data.get('error_message', 'Error desconocido')
-                await status_msg.edit_text(f"Error en extracción: {error_msg}")
-                self.db.update_source_status(source_id, 'failed', error_msg)
-                return
-            
-            # Guardar log
-            log_data['source_id'] = source_id
-            self.db.create_extraction_log(log_data)
-            
-            # Actualizar status en DB
-            self.db.update_source_status(source_id, 'extracted')
-            
-            # Agregar source_url
-            initiative_data['source_url'] = url
-            
-            # Verificar si hay campos faltantes (validación de Pydantic)
-            validation_passed = initiative_data.pop('_validation_passed', True)
-            missing_fields = initiative_data.pop('_missing_fields', [])
-            validation_error = initiative_data.pop('_validation_error', None)
-            
-            if not validation_passed and len(missing_fields) > 0:
-                # Guardar datos parciales
-                initiative_id = self.db.create_initiative(initiative_data, url)
-                self.pending_initiatives[initiative_id] = initiative_data
-                
-                # Mostrar preview con campos faltantes
-                await status_msg.delete()
-                await self._send_incomplete_preview(
-                    update, context, initiative_id, initiative_data, missing_fields
-                )
-                return
-            
-            # 4. Validación
-            await status_msg.edit_text("Validando datos...")
-            is_valid, errors, duplicates = self.validator.validate(initiative_data)
-            
-            if not is_valid:
-                # Extraer campos faltantes de los errores
-                missing_from_errors = []
-                for error in errors:
-                    if error.startswith("Campo requerido faltante: "):
-                        field = error.replace("Campo requerido faltante: ", "")
-                        missing_from_errors.append(field)
-                
-                # Si hay campos faltantes, mostrar interfaz de completar
-                if missing_from_errors:
-                    initiative_id = self.db.create_initiative(initiative_data, url)
-                    self.pending_initiatives[initiative_id] = initiative_data
-                    
-                    await status_msg.delete()
-                    await self._send_incomplete_preview(
-                        update, context, initiative_id, initiative_data, missing_from_errors
-                    )
-                    return
-                
-                # Si son otros errores, mostrar mensaje simple
-                error_text = "Errores de validación:\n\n" + "\n".join(f"• {e}" for e in errors)
-                await status_msg.edit_text(error_text)
-                return
-            
-            # 5. Guardar en DB como pending
-            initiative_id = self.db.create_initiative(initiative_data, url)
-            
-            # Guardar en contexto temporal
-            self.pending_initiatives[initiative_id] = initiative_data
-            
-            # 6. Mostrar preview
-            await status_msg.delete()
-            await self._send_preview(update, context, initiative_id, initiative_data, duplicates)
-            
-        except Exception as e:
-            logger.error(f"Error processing URL {url}: {e}")
-            await status_msg.edit_text(f"Error inesperado: {str(e)}")
-    
-    async def _send_preview(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-        initiative_id: int,
-        data: dict,
-        duplicates: list
-    ):
-        """Envía preview formateado con botones de confirmación."""
-        
-        # Construir mensaje
-        preview_text = self._format_preview(data, duplicates)
-        
-        # Botones
-        keyboard = [
-            [
-                InlineKeyboardButton("Confirmar y Publicar", callback_data=f"confirm_{initiative_id}"),
-                InlineKeyboardButton("Rechazar", callback_data=f"reject_{initiative_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.effective_chat.send_message(
-            preview_text,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-    
-    async def _send_incomplete_preview(
-        self,
-        update: Update,
-        context: ContextTypes.DEFAULT_TYPE,
-        initiative_id: int,
-        data: dict,
-        missing_fields: list
-    ):
-        """Envía preview de datos incompletos con instrucciones para completar."""
-        
-        # Mapeo de campos a nombres legibles en español
-        field_names = {
-            'nombre': 'Nombre de la iniciativa',
-            'descripcion': 'Descripción',
-            'categoria': 'Categoría',
-            'etiquetas': 'Etiquetas',
-            'tipo_proyecto': 'Tipo de Proyecto',
-            'tipo_enfoque': 'Tipo de Enfoque',
-            'descripcion_enfoque': 'Descripción del Enfoque',
-            'ods': 'ODS (Objetivos de Desarrollo Sostenible)',
-            'fuente_recursos': 'Fuente de Recursos',
-            'sector_economico': 'Sector Económico',
-            'cobertura': 'Cobertura',
-            'estatus': 'Estatus',
-            'tamano': 'Tamaño',
-            'ubicacion': 'Dirección',
-            'pais': 'País',
-            'region': 'Región/Estado',
-            'ciudad': 'Ciudad'
-        }
-        
-        # Construir mensaje
-        preview = f"⚠️ <b>Datos Incompletos - Requiere Completar</b>\n\n"
-        preview += f"Gemini extrajo la información pero <b>faltan {len(missing_fields)} campos obligatorios</b>:\n\n"
-        
-        for field in missing_fields:
-            field_label = field_names.get(field, field)
-            preview += f"❌ <b>{field_label}</b>\n"
-        
-        preview += f"\n📋 <b>Datos Extraídos:</b>\n\n"
-        
-        # Mostrar datos que sí se extrajeron
-        if data.get('nombre'):
-            preview += f"<b>Nombre:</b> {data['nombre']}\n"
-        if data.get('categoria'):
-            preview += f"<b>Categoría:</b> {data['categoria']}\n"
-        if data.get('ciudad'):
-            preview += f"<b>Ciudad:</b> {data['ciudad']}\n"
-        if data.get('region'):
-            preview += f"<b>Región:</b> {data['region']}\n"
-        
-        preview += f"\n💡 <b>Opciones:</b>\n"
-        preview += f"• <b>Completar ahora</b>: Te preguntaré cada campo faltante\n"
-        preview += f"• <b>Rechazar</b>: Descartar esta iniciativa"
-        
-        # Guardar missing_fields en contexto
-        context.user_data['pending_initiative_id'] = initiative_id
-        context.user_data['missing_fields'] = missing_fields
-        
-        # Botones
-        keyboard = [
-            [
-                InlineKeyboardButton("✏️ Completar Ahora", callback_data=f"edit_{initiative_id}"),
-                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{initiative_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.effective_chat.send_message(
-            preview,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-    
-    def _format_preview(self, data: dict, duplicates: list) -> str:
-        """Formatea los datos para el preview."""
-        
-        preview = f"<b>Preview de Iniciativa</b>\n\n"
-        
-        # Warning de duplicados
-        if duplicates:
-            preview += "<b>POSIBLES DUPLICADOS:</b>\n"
-            for dup in duplicates[:3]:
-                preview += f"  • {dup['nombre']} ({dup['ciudad']}) - {dup['similarity']}% similar\n"
-            preview += "\n"
-        
-        # Información básica
-        preview += f"<b>Nombre:</b> {data.get('nombre', 'N/A')}\n"
-        preview += f"<b>Categoría:</b> {data.get('categoria', 'N/A')}\n"
-        preview += f"<b>Ciudad:</b> {data.get('ciudad', 'N/A')}, {data.get('region', 'N/A')}\n\n"
-        
-        # Descripción (truncada)
-        desc = data.get('descripcion', '')
-        if len(desc) > 200:
-            desc = desc[:200] + "..."
-        preview += f"<b>Descripción:</b>\n{desc}\n\n"
-        
-        # Clasificación
-        preview += f"<b>Tipo:</b> {data.get('tipo_proyecto', 'N/A')}\n"
-        preview += f"<b>Enfoque:</b> {data.get('tipo_enfoque', 'N/A')}\n"
-        preview += f"<b>Estatus:</b> {data.get('estatus', 'N/A')}\n"
-        preview += f"<b>Tamaño:</b> {data.get('tamano', 'N/A')}\n\n"
-        
-        # Tags
-        tags = data.get('etiquetas', [])
-        if tags:
-            preview += f"<b>Etiquetas:</b> {', '.join(tags)}\n\n"
-        
-        # Contacto
-        if data.get('email'):
-            preview += f"<b>Email:</b> {data['email']}\n"
-        if data.get('sitio_web'):
-            preview += f"<b>Web:</b> {data['sitio_web']}\n"
-        if data.get('facebook'):
-            preview += f"<b>Facebook:</b> {data['facebook']}\n"
-        
-        return preview
-    
-    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handler de botones inline."""
-        query = update.callback_query
-        await query.answer()
-        
-        # Parse callback data
-        action, initiative_id = query.data.split('_')
-        initiative_id = int(initiative_id)
-        
-        if action == "confirm":
-            await self._confirm_initiative(query, initiative_id)
-        elif action == "reject":
-            await self._reject_initiative(query, initiative_id)
-        elif action == "edit":
-            await self._start_field_editing(query, context, initiative_id)
-    
-    async def _confirm_initiative(self, query, initiative_id: int):
-        """Confirma y publica una iniciativa."""
-        await query.edit_message_text("⏳ Publicando en Bekaab...")
-        
-        try:
-            # Obtener datos
-            initiative_data = self.pending_initiatives.get(initiative_id)
-            if not initiative_data:
-                # Intentar obtener desde DB
-                record = self.db.get_initiative(initiative_id)
-                if record:
-                    initiative_data = record['data']
-                else:
-                    await query.edit_message_text("❌ Error: Iniciativa no encontrada")
-                    return
-            
-            # Actualizar status en DB
-            self.db.update_initiative_status(initiative_id, 'confirmed')
-            
-            # Publicar en Bekaab
-            success, post_id, error = self.bekaab_client.create_initiative(initiative_data)
-            
-            if success:
-                # Actualizar status
-                self.db.update_initiative_status(initiative_id, 'published')
-                
-                # Limpiar contexto
-                if initiative_id in self.pending_initiatives:
-                    del self.pending_initiatives[initiative_id]
-                
-                await query.edit_message_text(
-                    f"<b>¡Iniciativa publicada con éxito!</b>\n\n"
-                    f"Post ID en Bekaab: {post_id}\n"
-                    f"Initiative ID local: {initiative_id}\n\n"
-                    f"La iniciativa se creó en estado 'draft' para revisión final.",
-                    parse_mode='HTML'
-                )
+            if update.message.photo:
+                answer = update.message.photo[-1].file_id
             else:
-                self.db.update_initiative_status(initiative_id, 'failed')
-                await query.edit_message_text(
-                    f"❌ <b>Error al publicar:</b>\n\n{error}",
-                    parse_mode='HTML'
-                )
+                answer = update.message.text
+                
+            await self._process_field_answer(update, context, answer)
+            return
         
-        except Exception as e:
-            logger.error(f"Error confirming initiative: {e}")
-            await query.edit_message_text(f"Error inesperado: {str(e)}")
-    
-    async def _reject_initiative(self, query, initiative_id: int):
-        """Rechaza una iniciativa."""
-        self.db.update_initiative_status(initiative_id, 'rejected')
-        
-        if initiative_id in self.pending_initiatives:
-            del self.pending_initiatives[initiative_id]
-        
-        await query.edit_message_text(
-            "Iniciativa rechazada.\n\n"
-            "Envía otra URL para procesar una nueva iniciativa."
-        )
-    
-    async def _start_field_editing(self, query, context: ContextTypes.DEFAULT_TYPE, initiative_id: int):
-        """Inicia el flujo de edición interactiva de campos."""
+        if update.message.text and self._is_valid_url(update.message.text):
+            await self._process_url(update, context, update.message.text)
+        elif update.message.photo:
+            return
+        else:
+            await update.message.reply_text("Envía una URL válida o procesa la actual.")
+
+    def _is_image_input_active(self, context):
+        mod_field = context.user_data.get('mod_field')
+        if mod_field == 'imagenes':
+            return True
+
         missing_fields = context.user_data.get('missing_fields', [])
+        idx = context.user_data.get('current_field_index', 0)
+        if missing_fields and idx < len(missing_fields):
+            return missing_fields[idx] == 'imagenes'
+
+        return False
+
+    async def _schedule_image_input_finalize(self, update, context, media_group_id):
+        existing_task = context.user_data.get('image_edit_finalize_task')
+        if existing_task and not existing_task.done():
+            existing_task.cancel()
+
+        task = asyncio.create_task(
+            self._finalize_image_input_after_delay(update, context, media_group_id)
+        )
+        context.user_data['image_edit_finalize_task'] = task
+
+    async def _finalize_image_input_after_delay(self, update, context, media_group_id):
+        try:
+            await asyncio.sleep(1.2)
+        except asyncio.CancelledError:
+            return
+
+        if context.user_data.get('image_edit_media_group') != media_group_id:
+            return
+
+        await self._finalize_image_input(update, context)
+
+    async def _finalize_image_input(self, update, context):
+        if not context.user_data.get('editing_mode'):
+            return
+
+        new_images = list(dict.fromkeys(context.user_data.get('image_edit_buffer', [])))
+        if not new_images:
+            return
+
+        await self._process_field_answer(update, context, new_images)
+            
+    async def _process_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
+        status_msg = await update.message.reply_text("Procesando...")
+        try:
+            data, _ = self.extractor.extract(url)
+            if not data:
+                await status_msg.edit_text("Error en extracción.")
+                return
+
+            self._normalize_initiative_data(data)
+            
+            initiative_id = self.db.create_initiative(data, url)
+            self.pending_initiatives[initiative_id] = data
+            
+            # Verificar campos faltantes (según form_config)
+            missing = [f for f, conf in FORM_CONFIG.items() if conf.get('required') and not data.get(f)]
+            
+            await status_msg.delete()
+            if missing:
+                context.user_data.update({'pending_id': initiative_id, 'missing': missing})
+                await self._send_incomplete_preview(update, context, initiative_id, data, missing)
+            else:
+                _, _, duplicates = self.validator.validate(data)
+                await self._send_preview(update, context, initiative_id, data, duplicates)
+        except Exception as e:
+            await status_msg.edit_text(f"Error: {str(e)}")
+
+    async def _send_preview(self, update, context, init_id, data, duplicates, edit=False, query=None):
+        self._normalize_initiative_data(data)
+
+        text = "<b>Preview de Iniciativa</b>\n\n"
+        for f, conf in FORM_CONFIG.items():
+            if data.get(f): 
+                val = data[f]
+                if isinstance(val, list):
+                    val = ", ".join(val)
+                text += f"<b>{conf['label']}:</b> {val}\n"
         
-        if not missing_fields:
+        # Pydantic validation
+        pydantic_errors = []
+        try:
+            Initiative(**data)
+        except ValidationError as e:
+            for err in e.errors():
+                field_raw = err["loc"][0] if err["loc"] else "Desconocido"
+                # Intentamos obtener un nombre amigable desde FORM_CONFIG
+                field_name = FORM_CONFIG.get(field_raw, {}).get("label", field_raw)
+                
+                err_type = err.get("type", "")
+                ctx = err.get("ctx", {})
+                
+                if err_type == "missing":
+                    msg = "Falta completar este campo obligatorio."
+                elif err_type == "string_too_short":
+                    min_len = ctx.get("min_length", "?")
+                    msg = f"El texto es muy corto (mínimo {min_len} caracteres requeridos)."
+                elif err_type == "string_too_long":
+                    max_len = ctx.get("max_length", "?")
+                    msg = f"El texto es muy largo (máximo {max_len} caracteres permitidos)."
+                elif err_type == "too_short" and isinstance(data.get(field_raw), list):
+                    min_len = ctx.get("min_length", "?")
+                    msg = f"Debes elegir/escribir al menos {min_len} opciones."
+                elif err_type == "too_long" and isinstance(data.get(field_raw), list):
+                    max_len = ctx.get("max_length", "?")
+                    msg = f"Debes elegir/escribir como máximo {max_len} opciones."
+                elif err_type == "string_type":
+                    msg = "Falta responder, o se esperaba un texto."
+                else:
+                    # Fallback si Pydantic regresa un error inesperado
+                    msg = err.get("msg", "Error de validación.")
+                    
+                pydantic_errors.append(f"<b>{field_name}:</b> {msg}")
+
+        if pydantic_errors:
+            text += "\n⚠️ <b>Faltan datos o tienen errores:</b>\n"
+            for err in pydantic_errors:
+                text += f"• {err}\n"
+        
+        keyboard = []
+        if not pydantic_errors:
+            keyboard.append([InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{init_id}")])
+            
+        keyboard.append([InlineKeyboardButton("✏️ Modificar Datos", callback_data=f"modmenu_{init_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{init_id}")])
+        markup = InlineKeyboardMarkup(keyboard)
+        
+        if edit and query: 
+            await query.edit_message_text(text, reply_markup=markup, parse_mode='HTML')
+        else: 
+            await update.effective_message.reply_text(text, reply_markup=markup, parse_mode='HTML')
+
+    async def _send_incomplete_preview(self, update, context, init_id, data, missing):
+        text = "⚠️ <b>Datos Incompletos</b>. Campos faltantes:\n"
+        for f in missing: text += f"• {FORM_CONFIG[f]['label']}\n"
+        
+        keyboard = [[InlineKeyboardButton("✏️ Completar Ahora", callback_data=f"edit_{init_id}")],
+                    [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{init_id}")]]
+        await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
+    async def _start_field_editing(self, query, context, initiative_id):
+        """Inicia el flujo de edición interactiva de campos faltantes."""
+        missing = context.user_data.get('missing', [])
+        if not missing:
             await query.edit_message_text("❌ No hay campos faltantes.")
             return
         
-        # Configurar modo edición
-        context.user_data['editing_mode'] = True
-        context.user_data['current_field_index'] = 0
-        context.user_data['editing_initiative_id'] = initiative_id
+        context.user_data.update({
+            'init_id': initiative_id,
+            'editing_mode': True,
+            'current_field_index': 0,
+            'missing_fields': missing,
+            'mod_field': None
+        })
         
-        # Preguntar primer campo
-        field_labels = {
-            'ubicacion': 'Ubicación/Dirección',
-            'region': 'Región/Estado',
-            'ciudad': 'Ciudad',
-            'pais': 'País'
-        }
+        await self._ask_current_field(query.message, context, is_callback=True)
+
+    async def _ask_current_field(self, message_or_query, context, is_callback=False):
+        """Helper para preguntar el campo actual en el flujo de completado."""
+        init_id = context.user_data['init_id']
+        missing = context.user_data['missing_fields']
+        idx = context.user_data['current_field_index']
+        field = missing[idx]
+        conf = FORM_CONFIG[field]
         
-        first_field = missing_fields[0]
-        field_label = field_labels.get(first_field, first_field)
-        
-        message = f"📝 <b>Completando campos ({1}/{len(missing_fields)})</b>\n\n"
-        message += f"<b>{field_label}:</b>\n"
-        message += "Envía tu respuesta:"
-        
-        await query.edit_message_text(message, parse_mode='HTML')
-    
-    async def _process_field_answer(self, update: Update, context: ContextTypes.DEFAULT_TYPE, answer: str):
-        """Procesa la respuesta del usuario para un campo."""
-        missing_fields = context.user_data.get('missing_fields', [])
-        current_index = context.user_data.get('current_field_index', 0)
-        initiative_id = context.user_data.get('editing_initiative_id')
-        
-        current_field = missing_fields[current_index]
-        initiative_data = self.pending_initiatives.get(initiative_id, {})
-        
-        # Guardar respuesta
-        if current_field == 'etiquetas':
-            tags = [tag.strip().lower() for tag in answer.split(',')]
-            initiative_data[current_field] = tags
+        msg = f"📝 <b>Completando campos ({idx + 1}/{len(missing)})</b>\n\n<b>{conf['label']}:</b>\n{conf['description']}"
+        if conf.get('example'): 
+            msg += f"\n\n💡 <i>{conf['example']}</i>"
+            
+        if conf['type'] == 'choice':
+            keyboard = [[InlineKeyboardButton(opt, callback_data=f"setchoice_{init_id}_{field}_{i}")] for i, opt in enumerate(conf['options'])]
+            markup = InlineKeyboardMarkup(keyboard)
+            if is_callback:
+                await message_or_query.edit_text(msg + "\n\nSelecciona una opción:", reply_markup=markup, parse_mode='HTML')
+            else:
+                await message_or_query.reply_text(msg + "\n\nSelecciona una opción:", reply_markup=markup, parse_mode='HTML')
+        elif conf['type'] == 'multiselect':
+            selected = context.user_data.setdefault('multiselect_selected', {})
+            if field not in selected:
+                selected[field] = []
+            await self._send_multiselect_prompt(
+                message_or_query=message_or_query,
+                context=context,
+                init_id=init_id,
+                field=field,
+                conf=conf,
+                selected_values=selected[field],
+                is_callback=is_callback,
+                show_back=False
+            )
         else:
-            initiative_data[current_field] = answer.strip()
+            msg += "\n\nEnvía tu respuesta:"
+            if is_callback:
+                await message_or_query.edit_text(msg, parse_mode='HTML')
+            else:
+                await message_or_query.reply_text(msg, parse_mode='HTML')
+
+    async def _send_multiselect_prompt(self, message_or_query, context, init_id, field, conf, selected_values, is_callback=False, show_back=False):
+        selected_values = selected_values or []
+        msg = f"📝 <b>{conf['label']}</b>\n\n{conf['description']}"
+        if conf.get('example'):
+            msg += f"\n\n💡 <i>{conf['example']}</i>"
+
+        keyboard = []
+        for i, opt in enumerate(conf['options']):
+            prefix = "✅ " if opt in selected_values else "▫️ "
+            keyboard.append([InlineKeyboardButton(f"{prefix}{opt}", callback_data=f"msel_{init_id}_{field}_{i}")])
+
+        keyboard.append([InlineKeyboardButton("✅ Listo", callback_data=f"msdone_{init_id}_{field}")])
+        if show_back:
+            keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")])
+
+        markup = InlineKeyboardMarkup(keyboard)
+        if is_callback:
+            if hasattr(message_or_query, 'edit_message_text'):
+                await message_or_query.edit_message_text(msg + "\n\nSelecciona una o más opciones:", reply_markup=markup, parse_mode='HTML')
+            else:
+                await message_or_query.edit_text(msg + "\n\nSelecciona una o más opciones:", reply_markup=markup, parse_mode='HTML')
+        else:
+            await message_or_query.reply_text(msg + "\n\nSelecciona una o más opciones:", reply_markup=markup, parse_mode='HTML')
+
+    async def handle_callback(self, update, context):
+        query = update.callback_query
+        await query.answer()
+        action, _, payload = query.data.partition('_')
+
+        if action in {"confirm", "reject", "edit", "modmenu", "back"}:
+            init_id = int(payload)
+            if action == "confirm":
+                await self._confirm(query, init_id)
+            elif action == "reject":
+                await self._reject(query, init_id)
+            elif action == "edit":
+                await self._start_field_editing(query, context, init_id)
+            elif action == "modmenu":
+                await self._send_mod_menu(query, init_id)
+            elif action == "back":
+                await self._back_to_preview(query, context, init_id)
+            return
+
+        if action == "modfield":
+            init_id_raw, field = payload.split('_', 1)
+            await self._start_field_mod(query, context, int(init_id_raw), field)
+            return
+
+        if action == "setchoice":
+            init_id_raw, rest = payload.split('_', 1)
+            field, idx_raw = rest.rsplit('_', 1)
+            val = FORM_CONFIG[field]['options'][int(idx_raw)]
+            context.user_data['init_id'] = int(init_id_raw)
+            await self._process_field_answer(update, context, val)
+            return
+
+        if action == "msel":
+            init_id_raw, rest = payload.split('_', 1)
+            field, idx_raw = rest.rsplit('_', 1)
+            init_id = int(init_id_raw)
+            option = FORM_CONFIG[field]['options'][int(idx_raw)]
+
+            selected = context.user_data.setdefault('multiselect_selected', {})
+            current = selected.setdefault(field, [])
+
+            if option in current:
+                current.remove(option)
+            else:
+                current.append(option)
+
+            selected[field] = current
+            await self._send_multiselect_prompt(
+                message_or_query=query,
+                context=context,
+                init_id=init_id,
+                field=field,
+                conf=FORM_CONFIG[field],
+                selected_values=current,
+                is_callback=True,
+                show_back=context.user_data.get('mod_field') is not None
+            )
+            return
+
+        if action == "msdone":
+            init_id_raw, field = payload.split('_', 1)
+            init_id = int(init_id_raw)
+            selected = context.user_data.get('multiselect_selected', {}).get(field, [])
+            context.user_data['init_id'] = init_id
+            await self._process_field_answer(update, context, selected)
+
+    async def _send_mod_menu(self, query, init_id):
+        keyboard = [[InlineKeyboardButton(conf['label'], callback_data=f"modfield_{init_id}_{f}")] for f, conf in FORM_CONFIG.items()]
+        keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")])
+        await query.edit_message_text("Selecciona campo a modificar:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _start_field_mod(self, query, context, init_id, field):
+        context.user_data.update({
+            'editing_mode': True, 
+            'mod_field': field, 
+            'init_id': init_id,
+            'missing_fields': []
+        })
+        if field == 'imagenes':
+            pending_task = context.user_data.pop('image_edit_finalize_task', None)
+            if pending_task and not pending_task.done():
+                pending_task.cancel()
+            context.user_data.pop('image_edit_media_group', None)
+            context.user_data.pop('image_edit_buffer', None)
+        conf = FORM_CONFIG[field]
+        msg = f"📝 Modificando <b>{conf['label']}</b>\n\n{conf['description']}"
+        if conf.get('example'): msg += f"\n\n💡 <i>{conf['example']}</i>"
         
-        self.pending_initiatives[initiative_id] = initiative_data
-        current_index += 1
-        context.user_data['current_field_index'] = current_index
-        
-        # Si ya completamos todos
-        if current_index >= len(missing_fields):
-            context.user_data['editing_mode'] = False
-            await update.message.reply_text("✅ ¡Campos completados! Validando...")
-            
-            is_valid, errors, duplicates = self.validator.validate(initiative_data)
-            
-            if not is_valid:
-                error_text = "❌ Errores:\n\n" + "\n".join(f"• {e}" for e in errors)
-                await update.message.reply_text(error_text)
-                context.user_data.clear()
-                return
-            
-            # Mostrar preview final
-            await self._send_final_preview(update, context, initiative_id, initiative_data, duplicates)
+        if conf['type'] == 'choice':
+            keyboard = [[InlineKeyboardButton(opt, callback_data=f"setchoice_{init_id}_{field}_{i}")] for i, opt in enumerate(conf['options'])]
+            keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")])
+            await query.edit_message_text(msg + "\n\nSelecciona una opción:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+        elif conf['type'] == 'multiselect':
+            data = self.pending_initiatives.get(init_id, {})
+            initial = data.get(field, [])
+            if isinstance(initial, str):
+                initial = [e.strip() for e in initial.split(',') if e.strip()]
+            context.user_data.setdefault('multiselect_selected', {})[field] = initial
+            await self._send_multiselect_prompt(
+                message_or_query=query,
+                context=context,
+                init_id=init_id,
+                field=field,
+                conf=conf,
+                selected_values=initial,
+                is_callback=True,
+                show_back=True
+            )
+        else:
+            keyboard = [[InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")]]
+            await query.edit_message_text(msg + "\n\nEnvía el nuevo valor:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
+
+    async def _process_field_answer(self, update, context, answer):
+        init_id = context.user_data.get('init_id')
+        if not init_id:
+            await update.effective_message.reply_text("❌ Error de sesión: init_id perdido. Vuelve a enviar la URL.")
             context.user_data.clear()
             return
+            
+        is_callback = update.callback_query is not None
+        message_to_edit = update.callback_query.message if is_callback else update.message
         
-        # Preguntar siguiente campo
-        field_labels = {
-            'ubicacion': 'Ubicación/Dirección',
-            'region': 'Región/Estado',
-            'ciudad': 'Ciudad',
-            'pais': 'País'
-        }
+        mod_field = context.user_data.get('mod_field')
+        missing_fields = context.user_data.get('missing_fields', [])
         
-        next_field = missing_fields[current_index]
-        field_label = field_labels.get(next_field, next_field)
+        data = self.pending_initiatives.get(init_id, {})
         
-        message = f"✅ Guardado.\n\n📝 <b>Campo {current_index + 1}/{len(missing_fields)}</b>\n\n"
-        message += f"<b>{field_label}:</b>\n"
-        message += "Envía tu respuesta:"
-        
-        await update.message.reply_text(message, parse_mode='HTML')
-    
-    async def _send_final_preview(self, update: Update, context: ContextTypes.DEFAULT_TYPE, initiative_id: int, data: dict, duplicates: list):
-        """Envía preview final después de completar campos."""
-        preview_text = self._format_preview(data, duplicates)
-        
-        keyboard = [
-            [
-                InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{initiative_id}"),
-                InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{initiative_id}")
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(
-            preview_text,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
-    
-    def _is_valid_url(self, text: str) -> bool:
-        """Valida que el texto sea una URL."""
-        try:
-            result = urlparse(text)
-            return all([result.scheme, result.netloc])
-        except:
-            return False
+        if mod_field:
+            if mod_field == 'imagenes':
+                new_images = self._coerce_field_value(mod_field, answer)
+                merged = []
+                for image_id in new_images:
+                    if image_id not in merged:
+                        merged.append(image_id)
+                data['imagenes'] = merged
+            else:
+                data[mod_field] = self._coerce_field_value(mod_field, answer)
+            self._normalize_initiative_data(data)
+
+            self.pending_initiatives[init_id] = data
+
+            self._clear_editing_state(context)
+            
+            # Show preview
+            _, _, dups = self.validator.validate(data)
+            # if is_callback, we can edit the message, else reply
+            await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+            
+        elif missing_fields:
+            # Sequencing through missing fields
+            idx = context.user_data.get('current_field_index', 0)
+            field = missing_fields[idx]
+
+            data[field] = self._coerce_field_value(field, answer)
+            self._normalize_initiative_data(data)
+                
+            self.pending_initiatives[init_id] = data
+            
+            idx += 1
+            if idx < len(missing_fields):
+                context.user_data['current_field_index'] = idx
+                await self._ask_current_field(message_to_edit, context, is_callback=is_callback)
+            else:
+                self._clear_editing_state(context)
+                _, _, dups = self.validator.validate(data)
+                
+                # Check Pydantic model for complete validation if needed, or Validator does it.
+                # Right now falling back to Validator because user wants Pydantic validation 
+                # but models.py handles strict Pydantic which we should invoke
+                
+                await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+
+    def _coerce_field_value(self, field, answer):
+        if answer is None:
+            return ""
+
+        if field in ('etiquetas', 'imagenes'):
+            if isinstance(answer, list):
+                return [str(e).strip() for e in answer if str(e).strip()]
+            if isinstance(answer, str):
+                return [e.strip() for e in answer.split(',') if e.strip()]
+            return [str(answer).strip()]
+
+        if field in ('ods', 'certificaciones'):
+            if isinstance(answer, list):
+                return ', '.join([str(e).strip() for e in answer if str(e).strip()])
+            return str(answer).strip()
+
+        if field == 'institucion' and str(answer).strip() == '(No seleccionar)':
+            return ''
+
+        return str(answer).strip()
+
+    def _normalize_initiative_data(self, data):
+        if not isinstance(data, dict):
+            return data
+
+        for list_field in ('etiquetas', 'imagenes'):
+            if list_field not in data:
+                continue
+            data[list_field] = self._coerce_field_value(list_field, data.get(list_field))
+
+        return data
+
+    def _clear_editing_state(self, context):
+        pending_task = context.user_data.pop('image_edit_finalize_task', None)
+        current_task = asyncio.current_task()
+        if pending_task and not pending_task.done() and pending_task is not current_task:
+            pending_task.cancel()
+
+        keys_to_remove = ['editing_mode', 'mod_field', 'missing_fields', 'current_field_index', 'image_edit_media_group', 'image_edit_buffer']
+        for k in keys_to_remove:
+            context.user_data.pop(k, None)
+
+    def _is_valid_url(self, text):
+        try: result = urlparse(text); return all([result.scheme, result.netloc])
+        except: return False
+
+    async def _confirm(self, query, init_id): await query.edit_message_text("Publicado!")
+    async def _reject(self, query, init_id): await query.edit_message_text("Descartado.")
+    async def _back_to_preview(self, query, context, init_id):
+        data = self.pending_initiatives.get(init_id)
+        if not data:
+            await query.edit_message_text("❌ No se encontró la iniciativa.")
+            return
+
+        mod_field = context.user_data.get('mod_field')
+        if mod_field and FORM_CONFIG.get(mod_field, {}).get('type') == 'multiselect':
+            selected = context.user_data.get('multiselect_selected', {}).get(mod_field)
+            if selected is not None:
+                data[mod_field] = self._coerce_field_value(mod_field, selected)
+                self.pending_initiatives[init_id] = data
+
+        self._clear_editing_state(context)
+        context.user_data.pop('multiselect_selected', None)
+
+        _, _, dups = self.validator.validate(data)
+        await self._send_preview(None, context, init_id, data, dups, edit=True, query=query)
+    async def _start_editing(self, query, context, init_id): pass
