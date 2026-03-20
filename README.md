@@ -28,7 +28,7 @@ TELEGRAM_BOT_TOKEN=       # Token del bot de Telegram
 TELEGRAM_ADMIN_USER_ID=   # Tu user ID de Telegram
 OPENROUTER_API_KEY=       # API key de OpenRouter
 CODE_SNIPPET_API_KEY=     # API key de Bekaab
-LLM_MODEL=google/gemini-2.5-flash-lite  # Modelo recomendado
+LLM_MODEL=deepseek/deepseek-v3.2
 ```
 
 ### 3. Despliegue
@@ -56,7 +56,7 @@ docker logs -f mision-mapeo-bot
 2. Envía `/start` para verificar que funciona
 3. Envía una URL de una iniciativa
 4. El bot procesará automáticamente:
-   - **Gemini accede directamente a la URL** (no necesita scraper)
+   - **DeepSeek accede directamente a la URL** (no necesita scraper)
    - Extracción inteligente del contenido con IA
    - Validación y detección de duplicados
 5. **Si faltan campos:** Presiona "Completar Ahora"
