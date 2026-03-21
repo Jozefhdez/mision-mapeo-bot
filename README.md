@@ -17,17 +17,17 @@ Bot de Telegram para registro asistido de iniciativas socioambientales en Bekaab
 # Copiar ejemplo de variables de entorno
 cp .env.example .env
 
-# Editar .env con tus credenciales
+# Edita .env con tus credenciales
 nano .env
 ```
 
 Configura las siguientes variables:
 
 ```bash
-TELEGRAM_BOT_TOKEN=       # Token del bot de Telegram
-TELEGRAM_ADMIN_USER_ID=   # Tu user ID de Telegram
-OPENROUTER_API_KEY=       # API key de OpenRouter
-CODE_SNIPPET_API_KEY=     # API key de Bekaab
+TELEGRAM_BOT_TOKEN= # Token del bot de Telegram
+ALLOWED_TELEGRAM_IDS= # IDs de usuarios permitidos separados por comas (Ej: 123456,7891011)
+OPENROUTER_API_KEY= # API key de OpenRouter
+CODE_SNIPPET_API_KEY= # API key de Bekaab
 LLM_MODEL=deepseek/deepseek-v3.2
 ```
 
@@ -56,15 +56,18 @@ docker logs -f mision-mapeo-bot
 2. Envía `/start` para verificar que funciona
 3. Envía una URL de una iniciativa
 4. El bot procesará automáticamente:
-   - **DeepSeek accede directamente a la URL** (no necesita scraper)
+   - **DeepSeek accede directamente a la URL**
    - Extracción inteligente del contenido con IA
    - Validación y detección de duplicados
 5. **Si faltan campos:** Presiona "Completar Ahora"
    - El bot te preguntará cada campo conversacionalmente
    - Responde con el texto correspondiente
    - Progreso visible (1/3, 2/3, etc.)
-6. Revisa el preview final y presiona "Confirmar y Publicar"
-7. ¡Listo! Se publica en Bekaab en modo draft
+6. **Si deseas modifcar campos:** Presiona "Modificar Datos"
+   - El bot te preguntará que campo deseas modificar
+   - Responde con las modificaciones o selecciona entre las opciones
+7. Revisa el preview final y presiona "Confirmar y Publicar"
+8. Listo, se publica en Bekaab
 
 ## Estructura del Proyecto
 
@@ -76,6 +79,7 @@ mision-mapeo-bot/
 │   ├── database.py        # SQLite operations
 │   ├── extractor.py       # LLM extraction (Gemini directo)
 │   ├── validator.py       # Validation & duplicates
+│   ├── form_config.py     # "Source of Truth" de todos los campos del formulario permitidos
 │   ├── bekaab_client.py   # Bekaab API client
 │   └── bot.py             # Telegram bot + editor conversacional
 ├── main.py                # Entry point
@@ -95,7 +99,7 @@ SQLite con 3 tablas:
 ## Comandos Útiles
 
 ```bash
-# Rebuildar imagen (después de cambios en código)
+# Rebuildar imagen
 docker stop mision-mapeo-bot
 docker rm mision-mapeo-bot
 docker build -t mision-mapeo-bot .
@@ -122,3 +126,13 @@ docker stop mision-mapeo-bot
 docker rm mision-mapeo-bot
 rm -rf data/ logs/
 ```
+
+## Entorno Cloud (Oracle Cloud Ready)
+
+El proyecto soporta interacción multi-usuario restringida mediante `ALLOWED_TELEGRAM_IDS` y está listo para producción en VPS.
+Para despliegue gratuito con **Oracle Cloud Always Free**:
+1. Accede y crea una instancia de **VM.Standard.E2.1.Micro** (x86_64) o **VM.Standard.A1.Flex** (ARM). OS recomendado: Ubuntu 22.04.
+2. Abre el puerto 22 (SSH) en la Security List del VCN en la consola de Oracle y en iptables internamente (si aplica).
+3. Instala Docker con `sudo apt install docker.io docker-compose-v2 -y`.
+4. Clona tu repositorio y crea tu archivo `.env`.
+5. Usa `docker compose up -d --build` para subir tu nodo de trabajo remoto.
