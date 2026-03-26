@@ -74,7 +74,7 @@ FORM_CONFIG = {
             "1: Fin de la pobreza", "2: Hambre cero", "3: Salud y bienestar", 
             "4: Educación de calidad", "5: Igualdad de género", "6: Agua limpia y saneamiento",
             "7: energía asequible y limpia", "8: Trabajo decente y crecimiento económico",
-            "9: Industria", "10: Reducción de la desigualdad", "11: Ciudades y comunidades sostenibles",
+            "9: Industria", "innovación e infraestructura", "10: Reducción de la desigualdad", "11: Ciudades y comunidades sostenibles",
             "12: Consumo y producción responsables", "13: Acción climática", "14: Vida bajo el agua",
             "15: Vida en tierra", "16: Paz y justicia Instituciones fuertes", "17: Alianzas para lograr los objetivos"
         ]
