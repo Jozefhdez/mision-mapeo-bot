@@ -127,12 +127,56 @@ docker rm mision-mapeo-bot
 rm -rf data/ logs/
 ```
 
-## Entorno Cloud (Oracle Cloud Ready)
+## Despliegue en la Nube
 
-El proyecto soporta interacción multi-usuario restringida mediante `ALLOWED_TELEGRAM_IDS` y está listo para producción en VPS.
-Para despliegue gratuito con **Oracle Cloud Always Free**:
-1. Accede y crea una instancia de **VM.Standard.E2.1.Micro** (x86_64) o **VM.Standard.A1.Flex** (ARM). OS recomendado: Ubuntu 22.04.
-2. Abre el puerto 22 (SSH) en la Security List del VCN en la consola de Oracle y en iptables internamente (si aplica).
-3. Instala Docker con `sudo apt install docker.io docker-compose-v2 -y`.
-4. Clona tu repositorio y crea tu archivo `.env`.
-5. Usa `docker compose up -d --build` para subir tu nodo de trabajo remoto.
+El proyecto soporta interacción multi-usuario restringida mediante `ALLOWED_TELEGRAM_IDS` y está listo para producción en cualquier VPS Linux con SSH y Docker.
+
+Los pasos base son los mismos para cualquier proveedor:
+1. Conéctate al servidor vía SSH.
+2. Instala Docker: `sudo apt install docker.io docker-compose-v2 -y`
+3. Clona el repositorio y crea tu archivo `.env`.
+4. Ejecuta `docker compose up -d --build`.
+
+---
+
+### Opción A — Oracle Cloud Always Free (gratuito)
+
+- Crea una instancia **VM.Standard.E2.1.Micro** (x86_64) o **VM.Standard.A1.Flex** (ARM). OS recomendado: Ubuntu 22.04.
+- Abre el puerto 22 (SSH) en la Security List del VCN y en `iptables` internamente si aplica.
+- Sigue los pasos base arriba.
+
+**Ideal si:** quieres costo cero. El bot consume muy pocos recursos.
+
+---
+
+### Opción B — GreenGeeks VPS ($69.95/mes en adelante)
+
+GreenGeeks ofrece VPS administrados con cPanel. El bot puede correr ahí perfectamente via Docker, aunque cPanel no es necesario para este proyecto.
+
+**Planes disponibles:**
+
+| Plan | RAM | vCPU | SSD | Transferencia | Precio/mes |
+|------|-----|------|-----|---------------|------------|
+| Básico | 4 GB | 4 | 75 GB | 10 TB | $69.95 |
+| Popular | 8 GB | 6 | 150 GB | 10 TB | $129.95 |
+| Pro | 16 GB | 6 | 250 GB | 10 TB | $179.95 |
+
+**Notas importantes:**
+- Incluye cPanel (no necesario para este bot, pero disponible).
+- GreenGeeks **no hace backups** del VPS — usa cPanel o un cron propio para respaldos.
+- El soporte de GreenGeeks solo cubre infraestructura y cPanel; Docker y el bot son responsabilidad tuya.
+- Compensa el 300% de su consumo energético con energía renovable.
+- IP dedicada incluida en todos los planes.
+
+**Pasos de configuración:**
+1. Contrata un plan VPS en GreenGeeks y espera el email con credenciales SSH.
+2. Conéctate: `ssh root@<tu-ip>`
+3. Instala Docker:
+   ```bash
+   curl -fsSL https://get.docker.com | sh
+   sudo apt install docker-compose-v2 -y
+   ```
+4. Sigue los pasos base arriba.
+5. Para reiniciar el VPS puedes usar el dashboard de GreenGeeks sin abrir ticket.
+
+**Ideal si:** ya tienes cuenta en GreenGeeks, prefieres soporte dedicado, o valoras el hosting eco-friendly.
