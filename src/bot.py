@@ -67,7 +67,14 @@ class InitiativeBot:
             await update.message.reply_text("❌ No autorizado.")
             return
         
-        await update.message.reply_text("¡Hola! Envía una URL para procesar una iniciativa.")
+        await update.message.reply_text(
+            "¡Hola! Envía una o más URLs de la misma iniciativa.\n\n"
+            "Puedes enviar varias URLs (sitio principal, redes sociales, notas de prensa, etc.) "
+            "para que el AI tenga más fuentes y extraiga datos más completos. "
+            "Asegúrate de que todas las URLs correspondan a la misma iniciativa.\n\n"
+            "Cuando hayas enviado todas las URLs, presiona <b>Procesar</b>.",
+            parse_mode='HTML'
+        )
     
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in self.allowed_user_ids:
@@ -104,11 +111,51 @@ class InitiativeBot:
             return
         
         if update.message.text and self._is_valid_url(update.message.text):
-            await self._process_url(update, context, update.message.text)
+            url = update.message.text.strip()
+            pending_urls = context.user_data.setdefault('pending_urls', [])
+            if url in pending_urls:
+                await update.message.reply_text("⚠️ Esa URL ya fue añadida.")
+                return
+            pending_urls.append(url)
+            count = len(pending_urls)
+
+            # Remove Procesar button from previous URL message
+            prev_msg_id = context.user_data.get('procesar_msg_id')
+            if prev_msg_id:
+                try:
+                    await context.bot.edit_message_reply_markup(
+                        chat_id=update.effective_chat.id,
+                        message_id=prev_msg_id,
+                        reply_markup=None
+                    )
+                except Exception:
+                    pass
+
+            keyboard = [
+                [InlineKeyboardButton("▶️ Procesar", callback_data="procesar")],
+                [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")],
+            ]
+            markup = InlineKeyboardMarkup(keyboard)
+
+            if count == 1:
+                text = (
+                    "✅ <b>URL 1 recibida.</b>\n\n"
+                    "Puedes enviar más URLs de la misma iniciativa para que el AI tenga más contexto, "
+                    "o presiona <b>Procesar</b> cuando estés listo."
+                )
+            else:
+                text = (
+                    f"✅ <b>URL {count} añadida.</b> Total: <b>{count} URLs</b>.\n\n"
+                    "Puedes seguir añadiendo más o presionar <b>Procesar</b> para continuar."
+                )
+
+            sent = await update.message.reply_text(text, reply_markup=markup, parse_mode='HTML')
+            context.user_data['procesar_msg_id'] = sent.message_id
+            context.user_data['procesar_chat_id'] = update.effective_chat.id
         elif update.message.photo:
             return
         else:
-            await update.message.reply_text("Envía una URL válida o procesa la actual.")
+            await update.message.reply_text("Envía una URL válida o presiona Cancelar para empezar de nuevo.")
 
     def _is_image_input_active(self, context):
         mod_field = context.user_data.get('mod_field')
@@ -153,29 +200,46 @@ class InitiativeBot:
 
         await self._process_field_answer(update, context, new_images)
             
-    async def _process_url(self, update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
-        status_msg = await update.message.reply_text("Procesando...")
+    async def _process_urls(self, query_or_update, context: ContextTypes.DEFAULT_TYPE, urls: list):
+        """Procesa una o más URLs de la misma iniciativa."""
+        is_query = hasattr(query_or_update, 'edit_message_text')
+        if is_query:
+            status_msg = await query_or_update.edit_message_text("⏳ Procesando URLs...")
+        else:
+            status_msg = await query_or_update.message.reply_text("⏳ Procesando...")
+
         try:
-            data, _ = self.extractor.extract(url)
+            data, _ = self.extractor.extract(urls)
             if not data:
                 await status_msg.edit_text("Error en extracción.")
                 return
 
             self._normalize_initiative_data(data)
-            
-            initiative_id = self.db.create_initiative(data, url)
+
+            initiative_id = self.db.create_initiative(data, urls)
             self.pending_initiatives[initiative_id] = data
-            
-            # Verificar campos faltantes (según form_config)
+
             missing = [f for f, conf in FORM_CONFIG.items() if conf.get('required') and not data.get(f)]
-            
+
             await status_msg.delete()
+
+            # For sending the preview we need an Update-like object; use a wrapper approach
+            class _FakeUpdate:
+                def __init__(self, message):
+                    self.effective_message = message
+                    self.callback_query = None
+
+            if is_query:
+                fake_update = _FakeUpdate(query_or_update.message)
+            else:
+                fake_update = _FakeUpdate(query_or_update.message)
+
             if missing:
                 context.user_data.update({'pending_id': initiative_id, 'missing': missing})
-                await self._send_incomplete_preview(update, context, initiative_id, data, missing)
+                await self._send_incomplete_preview(fake_update, context, initiative_id, data, missing)
             else:
                 _, _, duplicates = self.validator.validate(data)
-                await self._send_preview(update, context, initiative_id, data, duplicates)
+                await self._send_preview(fake_update, context, initiative_id, data, duplicates)
         except Exception as e:
             await status_msg.edit_text(f"Error: {str(e)}")
 
@@ -233,9 +297,10 @@ class InitiativeBot:
         keyboard = []
         if not pydantic_errors:
             keyboard.append([InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{init_id}")])
-            
+
         keyboard.append([InlineKeyboardButton("✏️ Modificar Datos", callback_data=f"modmenu_{init_id}")])
-        keyboard.append([InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{init_id}")])
+        keyboard.append([InlineKeyboardButton("🗑 Rechazar iniciativa", callback_data=f"reject_{init_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")])
         markup = InlineKeyboardMarkup(keyboard)
         
         if edit and query: 
@@ -244,11 +309,15 @@ class InitiativeBot:
             await update.effective_message.reply_text(text, reply_markup=markup, parse_mode='HTML')
 
     async def _send_incomplete_preview(self, update, context, init_id, data, missing):
-        text = "⚠️ <b>Datos Incompletos</b>. Campos faltantes:\n"
-        for f in missing: text += f"• {FORM_CONFIG[f]['label']}\n"
-        
-        keyboard = [[InlineKeyboardButton("✏️ Completar Ahora", callback_data=f"edit_{init_id}")],
-                    [InlineKeyboardButton("❌ Rechazar", callback_data=f"reject_{init_id}")]]
+        text = "⚠️ <b>Datos incompletos.</b> Faltan los siguientes campos:\n\n"
+        for f in missing:
+            text += f"• {FORM_CONFIG[f]['label']}\n"
+        text += "\nPuedes completarlos ahora o cancelar el registro."
+
+        keyboard = [
+            [InlineKeyboardButton("✏️ Completar ahora", callback_data=f"edit_{init_id}")],
+            [InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")],
+        ]
         await update.effective_message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
 
     async def _start_field_editing(self, query, context, initiative_id):
@@ -280,8 +349,11 @@ class InitiativeBot:
         if conf.get('example'): 
             msg += f"\n\n💡 <i>{conf['example']}</i>"
             
+        cancel_row = [InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")]
+
         if conf['type'] == 'choice':
             keyboard = [[InlineKeyboardButton(opt, callback_data=f"setchoice_{init_id}_{field}_{i}")] for i, opt in enumerate(conf['options'])]
+            keyboard.append([cancel_row[0]])
             markup = InlineKeyboardMarkup(keyboard)
             if is_callback:
                 await message_or_query.edit_text(msg + "\n\nSelecciona una opción:", reply_markup=markup, parse_mode='HTML')
@@ -302,11 +374,12 @@ class InitiativeBot:
                 show_back=False
             )
         else:
-            msg += "\n\nEnvía tu respuesta:"
+            keyboard = [[cancel_row[0]]]
+            markup = InlineKeyboardMarkup(keyboard)
             if is_callback:
-                await message_or_query.edit_text(msg, parse_mode='HTML')
+                await message_or_query.edit_text(msg + "\n\nEnvía tu respuesta:", reply_markup=markup, parse_mode='HTML')
             else:
-                await message_or_query.reply_text(msg, parse_mode='HTML')
+                await message_or_query.reply_text(msg + "\n\nEnvía tu respuesta:", reply_markup=markup, parse_mode='HTML')
 
     async def _send_multiselect_prompt(self, message_or_query, context, init_id, field, conf, selected_values, is_callback=False, show_back=False):
         selected_values = selected_values or []
@@ -322,6 +395,7 @@ class InitiativeBot:
         keyboard.append([InlineKeyboardButton("✅ Listo", callback_data=f"msdone_{init_id}_{field}")])
         if show_back:
             keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")])
 
         markup = InlineKeyboardMarkup(keyboard)
         if is_callback:
@@ -336,6 +410,20 @@ class InitiativeBot:
         query = update.callback_query
         await query.answer()
         action, _, payload = query.data.partition('_')
+
+        if action == "procesar":
+            urls = context.user_data.pop('pending_urls', [])
+            context.user_data.pop('procesar_msg_id', None)
+            context.user_data.pop('procesar_chat_id', None)
+            if not urls:
+                await query.edit_message_text("❌ No hay URLs para procesar.")
+                return
+            await self._process_urls(query, context, urls)
+            return
+
+        if action == "cancelar":
+            await self._cancel(query, context)
+            return
 
         if action in {"confirm", "reject", "edit", "modmenu", "back"}:
             init_id = int(payload)
@@ -423,6 +511,7 @@ class InitiativeBot:
         if conf['type'] == 'choice':
             keyboard = [[InlineKeyboardButton(opt, callback_data=f"setchoice_{init_id}_{field}_{i}")] for i, opt in enumerate(conf['options'])]
             keyboard.append([InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")])
+            keyboard.append([InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")])
             await query.edit_message_text(msg + "\n\nSelecciona una opción:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
         elif conf['type'] == 'multiselect':
             data = self.pending_initiatives.get(init_id, {})
@@ -441,7 +530,10 @@ class InitiativeBot:
                 show_back=True
             )
         else:
-            keyboard = [[InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")]]
+            keyboard = [
+                [InlineKeyboardButton("🔙 Volver", callback_data=f"back_{init_id}")],
+                [InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")],
+            ]
             await query.edit_message_text(msg + "\n\nEnvía el nuevo valor:", parse_mode='HTML', reply_markup=InlineKeyboardMarkup(keyboard))
 
     async def _process_field_answer(self, update, context, answer):
@@ -550,8 +642,20 @@ class InitiativeBot:
         try: result = urlparse(text); return all([result.scheme, result.netloc])
         except: return False
 
-    async def _confirm(self, query, init_id): await query.edit_message_text("Publicado!")
-    async def _reject(self, query, init_id): await query.edit_message_text("Descartado.")
+    async def _cancel(self, query, context):
+        """Cancela cualquier registro en curso y limpia toda la sesión."""
+        self._clear_editing_state(context)
+        keys_to_remove = ['pending_urls', 'procesar_msg_id', 'procesar_chat_id', 'pending_id',
+                          'missing', 'init_id', 'multiselect_selected']
+        for k in keys_to_remove:
+            context.user_data.pop(k, None)
+        await query.edit_message_text(
+            "🚫 <b>Registro cancelado.</b>\n\nPuedes enviar una nueva URL cuando quieras.",
+            parse_mode='HTML'
+        )
+
+    async def _confirm(self, query, init_id): await query.edit_message_text("✅ ¡Publicado!")
+    async def _reject(self, query, init_id): await query.edit_message_text("🗑 Iniciativa descartada.")
     async def _back_to_preview(self, query, context, init_id):
         data = self.pending_initiatives.get(init_id)
         if not data:

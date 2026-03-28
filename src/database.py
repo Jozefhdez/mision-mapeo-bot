@@ -91,15 +91,25 @@ class Database:
     
     # === INITIATIVES ===
     
-    def create_initiative(self, data: dict, source_url: Optional[str] = None) -> int:
-        """Crea una nueva iniciativa."""
+    def create_initiative(self, data: dict, source_urls=None) -> int:
+        """Crea una nueva iniciativa.
+
+        Args:
+            data: Datos de la iniciativa.
+            source_urls: URL o lista de URLs de origen. Se almacena como JSON si son varias.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
+        if isinstance(source_urls, list):
+            source_url_value = json.dumps(source_urls, ensure_ascii=False)
+        else:
+            source_url_value = source_urls
+
         cursor.execute("""
             INSERT INTO initiatives (data_json, status, source_url)
             VALUES (?, ?, ?)
-        """, (json.dumps(data, ensure_ascii=False), data.get('status', 'pending'), source_url))
+        """, (json.dumps(data, ensure_ascii=False), data.get('status', 'pending'), source_url_value))
         
         initiative_id = cursor.lastrowid
         conn.commit()

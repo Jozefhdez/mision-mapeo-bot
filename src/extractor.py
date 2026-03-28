@@ -30,21 +30,24 @@ class LLMExtractor:
         self.input_price = 0.10  # $0.10 per 1M tokens
         self.output_price = 0.40  # $0.40 per 1M tokens
     
-    def extract(self, url: str, max_retries: int = 1) -> tuple[Optional[Dict], Dict]:
+    def extract(self, urls: list, max_retries: int = 1) -> tuple[Optional[Dict], Dict]:
         """
-        Extrae información estructurada directamente de una URL.
-        
+        Extrae información estructurada de una o más URLs de la misma iniciativa.
+
         Args:
-            url: URL de la iniciativa a analizar
+            urls: URL o lista de URLs de la iniciativa a analizar
             max_retries: Número máximo de reintentos
-            
+
         Returns:
             tuple: (initiative_data, log_data)
         """
-        logger.info(f"Extracting initiative data from {url} using {self.model}")
-        
-        # Construir prompt con URL
-        prompt = self._build_prompt(url)
+        if isinstance(urls, str):
+            urls = [urls]
+
+        logger.info(f"Extracting initiative data from {len(urls)} URL(s) using {self.model}")
+
+        # Construir prompt con URL(s)
+        prompt = self._build_prompt(urls)
         
         # Intentar extracción
         for attempt in range(max_retries + 1):
@@ -105,16 +108,32 @@ class LLMExtractor:
         
         return None, {}
     
-    def _build_prompt(self, url: str) -> str:
+    def _build_prompt(self, urls: list) -> str:
         """Construye el prompt para el LLM."""
-        
+
+        if len(urls) == 1:
+            urls_section = f"URL: {urls[0]}"
+            source_instruction = "Tu tarea es visitar la siguiente URL y extraer información estructurada sobre la iniciativa:"
+            access_instruction = "Por favor, accede a esta URL, analiza todo el contenido de la página y extrae la información disponible"
+        else:
+            urls_lines = "\n".join(f"URL {i + 1}: {url}" for i, url in enumerate(urls))
+            urls_section = urls_lines
+            source_instruction = (
+                f"Tu tarea es visitar las siguientes {len(urls)} URLs, que corresponden todas a la misma iniciativa socioambiental, "
+                f"y combinar la información de todas las fuentes para generar una extracción más completa y precisa:"
+            )
+            access_instruction = (
+                "Por favor, accede a cada una de estas URLs, analiza todo el contenido disponible en cada página "
+                "y sintetiza la información combinada. Si hay datos contradictorios entre fuentes, prioriza la información más detallada"
+            )
+
         prompt = f"""Eres un asistente experto en análisis de iniciativas socioambientales.
 
-Tu tarea es visitar la siguiente URL y extraer información estructurada sobre la iniciativa:
+{source_instruction}
 
-URL: {url}
+{urls_section}
 
-Por favor, accede a esta URL, analiza todo el contenido de la página y extrae la información disponible
+{access_instruction}
 
         INSTRUCCIONES:
         Extrae TODA la información disponible y devuelve un JSON con la siguiente estructura EXACTA:
