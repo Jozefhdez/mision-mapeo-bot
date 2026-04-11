@@ -127,59 +127,61 @@ class LLMExtractor:
                 "y sintetiza la información combinada. Si hay datos contradictorios entre fuentes, prioriza la información más detallada"
             )
 
-        prompt = f"""Eres un asistente experto en análisis de iniciativas socioambientales.
+        prompt = f"""Eres un investigador experto en iniciativas socioambientales. Tu trabajo es extraer información REAL y VERIFICABLE de las páginas web que te dan — nunca inventar ni rellenar con datos genéricos.
 
 {source_instruction}
 
 {urls_section}
 
-{access_instruction}
+{access_instruction}. Lee el contenido completo: encabezados, sección "Acerca de", pie de página, páginas de contacto, enlaces internos visibles. No te detengas en la primera sección.
 
-        INSTRUCCIONES:
-        Extrae TODA la información disponible y devuelve un JSON con la siguiente estructura EXACTA:
+TAREA: Extrae toda la información disponible y devuelve un JSON con esta estructura EXACTA:
 
-        {{
-        "nombre": "Nombre de la iniciativa",
-        "descripcion": "Descripción detallada (mínimo 50 caracteres)",
-        "categoria": "Una de: Acción social, Educación y capacitación, Empresas, Instituciones, Productores, Puntos de intercambio, Tecnologías, Turismo y esparcimiento",
-        "etiquetas": ["palabra1", "palabra2", "palabra3"],
-        "tipo_proyecto": "Uno de: En el Hogar, En el Trabajo, Sin Fines de Lucro, Empresarial, Institución u Organización",
-        "tipo_enfoque": "Uno de: Social, Ambiental, Sustentable, Regenerativo, Economía Circular",
-        "descripcion_enfoque": "Explicación detallada de por qué tiene este enfoque (mínimo 200 caracteres)",
-        "ods": "Objetivo(s) de Desarrollo Sostenible, ej: '15: Vida en tierra'",
-        "fuente_recursos": "Uno de: Particular, Privada, Pública, Mixta",
-        "sector_economico": "Uno de: Agropecuario, Industrial, De infraestructura pública, De infraestructura económica, De servicios, No aplica",
-        "cobertura": "Uno de: Local, Regional, Nacional, Multinacional, Global",
-        "estatus": "Uno de: Idea, En diseño o construcción, Reciente, Consolidado, Completado",
-        "tamano": "Uno de: De 1 a 2 colaboradores, De 3 a 10 colaboradores, De 11 a 50 colaboradores, De 51 a 100 colaboradores, De 101 a 500 colaboradores, Más de 500 colaboradores",
-        "ubicacion": "Dirección completa si está disponible",
-        "pais": "País (preferir 'Mexico' si es de México)",
-        "region": "Estado o región",
-        "ciudad": "Ciudad",
-        "codigo_postal": "CP si está disponible o null",
-        "telefono": "Teléfono si está disponible o null",
-        "email": "Email si está disponible o null",
-        "sitio_web": "URL del sitio web o null",
-        "facebook": "URL de Facebook o null",
-        "twitter": "URL de Twitter/X o null",
-        "instagram": "URL de Instagram o null",
-        "institucion": "Nombre de institución relacionada o null"
-        }}
+{{
+  "nombre": "Nombre oficial de la iniciativa tal como aparece en el sitio",
+  "descripcion": "Descripción extraída y elaborada del contenido real de la página",
+  "categoria": "EXACTAMENTE una de: Acción en área natural | Acción en Casa | Acción en el trabajo | Acción en escuela | Acción en localidad | Otra acción | Centro de investigación | Cursos o talleres | Educación básica | Educación media | Educación superior | Otra iniciativa educativa | Agricultura o Jardinería | Alimentos o Bebidas | Aparatos Electrónicos | Artículos Desechables | Belleza o Cuidado | Bolsas | Certificadoras | Comercio, Finanzas e Inversión | Consultoría o Servicios | Decoración de Interiores | Emprendimiento | Hogar | Limpieza | Madera | Mascotas | Medios de Comunicación | Mercadotecnia o Publicidad | Niños y bebés | Otro producto o servicio | Papelería y oficina | Reciclaje o desechos | Ropa y accesorios | Salud | Servicios y artículos funerarios | Centro de acopio | Organizacion gubernamental | Organización internacional | Organización No Gubernamental | Otra institución | Agricultura o ganadería | Apicultura | Aprovechamiento forestal | Artesanía | Caza, pesca o recolección | Otra producción | Centro comercial | Otro punto de intercambio | Tianguis o mercado | Tienda | Agua | Aire | Arquitectura o Construcción | Energía | Otra tecnologia | Suelo | Transporte | Balneario | Hotel | Otro turismo | Parque | Restaurante | Transporte (servicio)",
+  "etiquetas": ["palabra1", "palabra2", "palabra3"],
+  "tipo_proyecto": "EXACTAMENTE uno de: En el Hogar | En el Trabajo | Sin Fines de Lucro | Empresarial | Institución u Organización",
+  "tipo_enfoque": "EXACTAMENTE uno de: Social | Ambiental | Sustentable | Regenerativo | Economía Circular",
+  "descripcion_enfoque": "Explicación detallada basada en el contenido real",
+  "ods": "ODS relevantes, ej: '13: Acción climática, 15: Vida en tierra'",
+  "fuente_recursos": "EXACTAMENTE uno de: Particular | Privada | Pública | Mixta",
+  "sector_economico": "EXACTAMENTE uno de: Agropecuario | Industrial | De infraestructura pública | De infraestructura económica | De servicios | No aplica",
+  "cobertura": "EXACTAMENTE uno de: Local | Regional | Nacional | Multinacional | Global",
+  "estatus": "EXACTAMENTE uno de: Idea | En diseño o construcción | Reciente | Consolidado | Completado",
+  "tamano": "EXACTAMENTE uno de: De 1 a 2 colaboradores | De 3 a 10 colaboradores | De 11 a 50 colaboradores | De 51 a 100 colaboradores | De 101 a 500 colaboradores | Más de 500 colaboradores",
+  "ubicacion": "Dirección completa si aparece en el sitio, o null",
+  "pais": "País. Usa 'Mexico' para México. Infiere del dominio (.mx), menciones de ciudades, o contexto",
+  "region": "Estado o provincia. Extrae del contenido o infiere de menciones geográficas",
+  "ciudad": "Ciudad. Extrae del contenido o infiere de menciones geográficas",
+  "latitud": "Coordenada decimal si se puede inferir de la ubicación conocida (ej: '19.4326' para CDMX), o null",
+  "longitud": "Coordenada decimal si se puede inferir de la ubicación conocida (ej: '-99.1332' para CDMX), o null",
+  "codigo_postal": "CP si aparece explícitamente, o null",
+  "telefono": "Teléfono si aparece en el sitio, o null",
+  "email": "Email de contacto si aparece en el sitio, o null",
+  "sitio_web": "URL principal del sitio, o null",
+  "facebook": "URL completa de Facebook si aparece, o null",
+  "twitter": "URL completa de Twitter/X si aparece, o null",
+  "instagram": "URL completa de Instagram si aparece, o null",
+  "institucion": "Institución u organización relacionada si se menciona, o null"
+}}
 
-        REGLAS IMPORTANTES:
-        1. Devuelve SOLO el JSON válido, sin texto adicional antes o después
-        2. CAMPOS CRÍTICOS (intenta siempre extraer o inferir razonablemente):
-           - nombre, descripcion, categoria, tipo_proyecto, tipo_enfoque, descripcion_enfoque
-           - Si no hay ubicación exacta, infiere de pistas (ej: dominio .mx = Mexico, menciones de ciudades)
-        3. CAMPOS OPCIONALES (usa null si no encuentras):
-           - ubicacion, codigo_postal, telefono, email, redes sociales
-        4. Para región y ciudad: Si no las encuentras explícitas pero hay pistas (dominio, texto), infiere razonablemente
-        5. Las etiquetas deben ser 3-5 palabras clave en minúsculas relacionadas con la iniciativa
-        6. La descripción debe ser detallada (mínimo 50 caracteres) - extrae del contenido principal
-        7. La descripción del enfoque debe justificar por qué tiene ese enfoque (mínimo 200 caracteres)
-        8. Si el sitio menciona México/ciudades mexicanas, usa "Mexico" como país
+REGLAS ANTI-ALUCINACIÓN (MUY IMPORTANTE):
+1. NUNCA inventes datos. Si un campo no tiene evidencia en el contenido, usa null.
+2. "Inferir razonablemente" significa: deducir de pistas concretas (dominio .mx, nombre de ciudad mencionado, dirección parcial). NO significa adivinar o inventar.
+3. Para campos de opción fija (categoria, tipo_proyecto, tipo_enfoque, etc.): elige SIEMPRE la opción más cercana semánticamente. Nunca escribas un valor que no esté en la lista.
+4. Si hay duda entre dos opciones de lista, elige la más específica y representativa.
+5. Para latitud/longitud: solo incluye coordenadas si conoces la ciudad/municipio con certeza — usa el centro de esa ciudad. Si la ubicación es incierta, usa null.
 
-        JSON:"""
+REGLAS DE CALIDAD:
+6. Devuelve SOLO el JSON válido, sin texto antes ni después.
+7. "descripcion": MÍNIMO 3 párrafos separados por \\n\\n. Basados en el contenido real: qué hace la iniciativa, cómo lo hace, cuál es su impacto. No uses listas ni bullets.
+8. "descripcion_enfoque": MÍNIMO 3 párrafos separados por \\n\\n. Explica por qué tiene ese tipo de enfoque, cómo se expresa en sus actividades y qué impacto genera. Basado en evidencia del sitio.
+9. "etiquetas": 3 a 5 palabras clave en minúsculas que describan la iniciativa con precisión.
+10. Busca información de contacto en: pie de página, sección "Contacto", sección "Acerca de", metadatos de redes sociales, texto visible.
+
+JSON:"""
         
         return prompt
     

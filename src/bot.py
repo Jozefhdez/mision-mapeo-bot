@@ -55,6 +55,7 @@ class InitiativeBot:
         application = Application.builder().token(self.token).build()
         
         application.add_handler(CommandHandler("start", self.start_command))
+        application.add_handler(CommandHandler("cuenta", self.cuenta_command))
         # Removemos las fotos agrupadas y otros tipos de media ajena a menos que sea el campo de imagenes.
         application.add_handler(MessageHandler((filters.TEXT | filters.PHOTO) & ~filters.COMMAND, self.handle_message))
         application.add_handler(CallbackQueryHandler(self.handle_callback))
@@ -76,8 +77,37 @@ class InitiativeBot:
             parse_mode='HTML'
         )
     
+    async def cuenta_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if update.effective_user.id not in self.allowed_user_ids:
+            return
+
+        telegram_id = update.effective_user.id
+        account = self.db.get_user_account(telegram_id)
+
+        if account:
+            text = (
+                f"✅ <b>Cuenta de Bekaab vinculada</b>\n\n"
+                f"👤 {account['bekaab_display_name']}\n"
+                f"📧 {account['bekaab_email']}\n\n"
+                f"Las iniciativas se publicarán bajo tu nombre."
+            )
+            keyboard = [[InlineKeyboardButton("🔓 Desvincular cuenta", callback_data="desvincular")]]
+        else:
+            text = (
+                "ℹ️ <b>No tienes una cuenta de Bekaab vinculada.</b>\n\n"
+                "Vincula tu cuenta para que las iniciativas se publiquen bajo tu nombre en Bekaab."
+            )
+            keyboard = [[InlineKeyboardButton("🔗 Vincular mi cuenta de Bekaab", callback_data="vincular")]]
+
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='HTML')
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         if update.effective_user.id not in self.allowed_user_ids:
+            return
+
+        # Account linking flow takes priority
+        if context.user_data.get('linking_step'):
+            await self._handle_linking_input(update, context)
             return
 
         if context.user_data.get('editing_mode') and update.message.photo and self._is_image_input_active(context):
@@ -216,30 +246,27 @@ class InitiativeBot:
 
             self._normalize_initiative_data(data)
 
-            initiative_id = self.db.create_initiative(data, urls)
-            self.pending_initiatives[initiative_id] = data
+            # Use telegram_user_id as key — each user has exactly one active initiative
+            user_id = query_or_update.from_user.id
+            self.pending_initiatives[user_id] = data
 
             missing = [f for f, conf in FORM_CONFIG.items() if conf.get('required') and not data.get(f)]
 
             await status_msg.delete()
 
-            # For sending the preview we need an Update-like object; use a wrapper approach
             class _FakeUpdate:
                 def __init__(self, message):
                     self.effective_message = message
                     self.callback_query = None
 
-            if is_query:
-                fake_update = _FakeUpdate(query_or_update.message)
-            else:
-                fake_update = _FakeUpdate(query_or_update.message)
+            fake_update = _FakeUpdate(query_or_update.message)
 
             if missing:
-                context.user_data.update({'pending_id': initiative_id, 'missing': missing})
-                await self._send_incomplete_preview(fake_update, context, initiative_id, data, missing)
+                context.user_data.update({'pending_id': user_id, 'missing': missing})
+                await self._send_incomplete_preview(fake_update, context, user_id, data, missing)
             else:
                 _, _, duplicates = self.validator.validate(data)
-                await self._send_preview(fake_update, context, initiative_id, data, duplicates)
+                await self._send_preview(fake_update, context, user_id, data, duplicates)
         except Exception as e:
             await status_msg.edit_text(f"Error: {str(e)}")
 
@@ -425,6 +452,35 @@ class InitiativeBot:
             await self._cancel(query, context)
             return
 
+        if action == "vincular":
+            context.user_data['linking_step'] = 'token'
+            keyboard = [[InlineKeyboardButton("❌ Cancelar", callback_data="cancelarlink")]]
+            await query.edit_message_text(
+                "🔗 <b>Vincular cuenta de Bekaab</b>\n\n"
+                "1. Ve a <b>bekaab.org/vincular-bot</b> mientras estás logueado.\n"
+                "2. Copia el código de 8 caracteres que aparece.\n"
+                "3. Envíalo aquí.\n\n"
+                "El código es válido por 15 minutos.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            return
+
+        if action == "desvincular":
+            self.db.delete_user_account(query.from_user.id)
+            await query.edit_message_text(
+                "✅ Cuenta de Bekaab desvinculada.\n\n"
+                "Las próximas iniciativas se publicarán bajo el autor por defecto.\n"
+                "Usa /cuenta para vincular una cuenta nueva."
+            )
+            return
+
+        if action == "cancelarlink":
+            context.user_data.pop('linking_step', None)
+            context.user_data.pop('linking_email', None)
+            await query.edit_message_text("❌ Vinculación cancelada.")
+            return
+
         if action in {"confirm", "reject", "edit", "modmenu", "back"}:
             init_id = int(payload)
             if action == "confirm":
@@ -566,11 +622,13 @@ class InitiativeBot:
             self.pending_initiatives[init_id] = data
 
             self._clear_editing_state(context)
-            
-            # Show preview
+
             _, _, dups = self.validator.validate(data)
-            # if is_callback, we can edit the message, else reply
-            await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+            try:
+                await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+            except Exception as e:
+                logger.error(f"Error showing preview after field mod: {e}")
+                await update.effective_message.reply_text(f"❌ Error al mostrar el preview: {e}")
             
         elif missing_fields:
             # Sequencing through missing fields
@@ -589,12 +647,11 @@ class InitiativeBot:
             else:
                 self._clear_editing_state(context)
                 _, _, dups = self.validator.validate(data)
-                
-                # Check Pydantic model for complete validation if needed, or Validator does it.
-                # Right now falling back to Validator because user wants Pydantic validation 
-                # but models.py handles strict Pydantic which we should invoke
-                
-                await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+                try:
+                    await self._send_preview(update, context, init_id, data, dups, edit=is_callback, query=update.callback_query)
+                except Exception as e:
+                    logger.error(f"Error showing preview after field completion: {e}")
+                    await update.effective_message.reply_text(f"❌ Error al mostrar el preview: {e}")
 
     def _coerce_field_value(self, field, answer):
         if answer is None:
@@ -642,6 +699,43 @@ class InitiativeBot:
         try: result = urlparse(text); return all([result.scheme, result.netloc])
         except: return False
 
+    async def _handle_linking_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handles free-text input during account linking flow."""
+        step = context.user_data.get('linking_step')
+        text = (update.message.text or '').strip()
+
+        if not text:
+            return
+
+        if step == 'token':
+            context.user_data.pop('linking_step', None)
+
+            status_msg = await update.message.reply_text("⏳ Verificando código...")
+
+            success, user_data, error = self.bekaab_client.authenticate(text)
+
+            if success:
+                self.db.save_user_account(
+                    update.effective_user.id,
+                    user_data['user_id'],
+                    user_data['display_name'],
+                    user_data['email']
+                )
+                await status_msg.edit_text(
+                    f"✅ <b>Cuenta vinculada correctamente.</b>\n\n"
+                    f"👤 {user_data['display_name']}\n"
+                    f"📧 {user_data['email']}\n\n"
+                    f"Las iniciativas se publicarán bajo tu nombre.",
+                    parse_mode='HTML'
+                )
+            else:
+                keyboard = [[InlineKeyboardButton("🔄 Intentar de nuevo", callback_data="vincular")]]
+                await status_msg.edit_text(
+                    f"❌ <b>{error}</b>\n\nGenera un nuevo código en bekaab.org/vincular-bot e inténtalo de nuevo.",
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+
     async def _cancel(self, query, context):
         """Cancela cualquier registro en curso y limpia toda la sesión."""
         self._clear_editing_state(context)
@@ -654,7 +748,48 @@ class InitiativeBot:
             parse_mode='HTML'
         )
 
-    async def _confirm(self, query, init_id): await query.edit_message_text("✅ ¡Publicado!")
+    async def _confirm(self, query, init_id):
+        data = self.pending_initiatives.get(init_id)
+        if not data:
+            await query.edit_message_text("❌ Error: no se encontraron los datos de la iniciativa.")
+            return
+
+        await query.edit_message_text("⏳ Publicando en Bekaab...")
+
+        # Use the linked Bekaab account for this Telegram user
+        account = self.db.get_user_account(query.from_user.id)
+        post_author = account['bekaab_user_id'] if account else None
+
+        success, post_id, error_msg, post_url = self.bekaab_client.create_initiative(data, post_author=post_author)
+
+        if success:
+            imagenes = data.get('imagenes', [])
+            img_text = ''
+            if imagenes:
+                await query.edit_message_text("⏳ Subiendo imágenes...")
+                success_count, img_errors = self.bekaab_client.upload_images(post_id, imagenes, self.token)
+                if img_errors:
+                    img_text = f"\n🖼 Imágenes: {success_count}/{len(imagenes)} subidas."
+                else:
+                    img_text = f"\n🖼 {success_count} imagen(es) subida(s)."
+
+            author_text = f"\n👤 Publicado como: {account['bekaab_display_name']}" if account else ""
+            url_text = f"\n🔗 <a href=\"{post_url}\">{post_url}</a>" if post_url else ""
+            self.pending_initiatives.pop(init_id, None)
+            await query.edit_message_text(
+                f"✅ <b>¡Iniciativa publicada!</b>"
+                f"{author_text}{url_text}{img_text}\n\n"
+                f"⚠️ <i>Por favor revísala y corrige cualquier error, el bot está en desarrollo.</i>",
+                parse_mode='HTML',
+                disable_web_page_preview=True
+            )
+        else:
+            keyboard = [[InlineKeyboardButton("🔄 Reintentar", callback_data=f"confirm_{init_id}")]]
+            await query.edit_message_text(
+                f"❌ <b>Error al publicar.</b>\n\n<code>{error_msg}</code>\n\nPuedes reintentar o cancelar.",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
     async def _reject(self, query, init_id): await query.edit_message_text("🗑 Iniciativa descartada.")
     async def _back_to_preview(self, query, context, init_id):
         data = self.pending_initiatives.get(init_id)

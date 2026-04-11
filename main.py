@@ -81,10 +81,7 @@ def main():
         model=os.getenv('LLM_MODEL', 'google/gemini-2.5-flash-lite')
     )
     
-    validator = Validator(
-        db=db,
-        similarity_threshold=85
-    )
+    validator = Validator()
     
     bekaab_client = BekaabClient(
         api_url=os.getenv('BEKAAB_API_URL'),

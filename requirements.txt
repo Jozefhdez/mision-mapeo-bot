@@ -7,7 +7,3 @@ python-dotenv==1.0.0
 
 # Database
 sqlalchemy==2.0.25
-
-# Utilities
-fuzzywuzzy==0.18.0
-python-Levenshtein==0.25.0
