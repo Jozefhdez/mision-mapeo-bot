@@ -326,7 +326,6 @@ class InitiativeBot:
             keyboard.append([InlineKeyboardButton("✅ Confirmar y Publicar", callback_data=f"confirm_{init_id}")])
 
         keyboard.append([InlineKeyboardButton("✏️ Modificar Datos", callback_data=f"modmenu_{init_id}")])
-        keyboard.append([InlineKeyboardButton("🗑 Rechazar iniciativa", callback_data=f"reject_{init_id}")])
         keyboard.append([InlineKeyboardButton("❌ Cancelar registro", callback_data="cancelar")])
         markup = InlineKeyboardMarkup(keyboard)
         
